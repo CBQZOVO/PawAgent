@@ -1,0 +1,290 @@
+import { useEffect, useRef, useState } from 'react';
+import type { RefObject } from 'react';
+import { ArrowRightLeft, ArrowUp, Check, ChevronDown, Link2, Paperclip, Sparkles, Square, X } from 'lucide-react';
+import type { Attachment, ContextReading, HandoffContext, ViewMessage } from '@paw/shared';
+import { getSkills, type ModelInfo } from '../api/client';
+import ModelMenu from './ModelMenu';
+import WorkspacePicker from './WorkspacePicker';
+import ComposerEditor, { type ComposerFocus } from './composer/ComposerEditor';
+import ContextMeter from './composer/ContextMeter';
+
+interface SkillItem { id: string; name: string; description: string }
+
+/** 输入区：textarea + 附件/技能 chip + 上传/技能/模型/发送 */
+export default function Composer({
+  input, attachments, readingFiles, busy, compacting, model, models, modelMenu, modelSearch, modelsRefreshing,
+  contextSessionId, contextTurn, contextMessages, contextReading, selectedSkills, selectedConnection, onSelectConnection, focusRef,
+  handoffDraft, onUpdateHandoffDraft, onClearHandoffDraft, onOpenHandoffSource, onCompact, onHandoff,
+  onInput, onAddFiles, onRemoveFile, onSkillPaste, onRestoreAttachment,
+  onToggleSkill, onClearSkills,
+  onToggleModel, onCloseModel, onModelSearch, onSelectModel, onSend, onStop,
+}: {
+  input: string;
+  attachments: Attachment[];
+  readingFiles: boolean;
+  busy: boolean;
+  compacting: boolean;
+  model: string;
+  models: ModelInfo[];
+  modelMenu: boolean;
+  modelSearch: string;
+  modelsRefreshing: boolean;
+  contextSessionId: string;
+  contextTurn?: ViewMessage;
+  contextMessages: ViewMessage[];
+  contextReading?: ContextReading;
+  selectedSkills: string[];
+  /** 这条消息指定用哪个系统连接（null=不指定） */
+  selectedConnection: string | null;
+  onSelectConnection: (code: string | null) => void;
+  /** 富文本输入区暴露的 focus（发送后自动聚焦） */
+  focusRef: RefObject<ComposerFocus | null>;
+  /** 待随首条消息发出的会话交接草稿（方案 A：独立可展开/可编辑卡片） */
+  handoffDraft?: HandoffContext | null;
+  onUpdateHandoffDraft?: (summary: string) => void;
+  onClearHandoffDraft?: () => void;
+  onOpenHandoffSource?: (sessionId: string) => void;
+  onCompact?: () => void;
+  onHandoff?: () => void;
+  onInput: (v: string) => void;
+  onAddFiles: (files: FileList | null) => void;
+  onRemoveFile: (i: number) => void;
+  /** 粘贴里带了 @skill:xxx —— 转成已选技能 */
+  onSkillPaste: (skillIds: string[]) => void;
+  /** undo 把删掉的 chip 还原时，把附件也还回来 */
+  onRestoreAttachment: (a: Attachment) => void;
+  onToggleSkill: (id: string) => void;
+  onClearSkills: () => void;
+  onToggleModel: () => void;
+  onCloseModel: () => void;
+  onModelSearch: (s: string) => void;
+  onSelectModel: (id: string) => void;
+  onSend: (text: string) => void;
+  onStop: () => void;
+}) {
+  const fileRef = useRef<HTMLInputElement>(null);
+  const skillWrapRef = useRef<HTMLDivElement>(null);
+  const connWrapRef = useRef<HTMLDivElement>(null);
+  const [skillMenu, setSkillMenu] = useState(false);
+  const [connMenu, setConnMenu] = useState(false);
+  const [conns, setConns] = useState<{ code: string; name: string; kind?: string }[]>([]);
+  const [skillSearch, setSkillSearch] = useState('');
+  const [skills, setSkills] = useState<SkillItem[]>([]);
+  const isImageModel = /^gpt-image-/i.test(model);
+
+  useEffect(() => {
+    if (skillMenu) void getSkills().then(setSkills);
+  }, [skillMenu]);
+
+  // 连接列表按需拉（和技能一样，打开菜单才请求）
+  useEffect(() => {
+    if (!connMenu) return;
+    fetch('/api/connections').then((r) => r.json())
+      .then((d: { connections?: { code: string; name: string; kind?: string }[] }) => setConns(d.connections || []))
+      .catch(() => setConns([]));
+  }, [connMenu]);
+
+  useEffect(() => {
+    if (!connMenu) return;
+    const onDown = (e: MouseEvent) => {
+      if (connWrapRef.current && !connWrapRef.current.contains(e.target as Node)) setConnMenu(false);
+    };
+    document.addEventListener('mousedown', onDown);
+    return () => document.removeEventListener('mousedown', onDown);
+  }, [connMenu]);
+
+  // 点击弹窗外关闭（用 mousedown：点按钮本身时 toggle 照常，点别处才关）
+  useEffect(() => {
+    if (!skillMenu) return;
+    const onDown = (e: MouseEvent) => {
+      if (skillWrapRef.current && !skillWrapRef.current.contains(e.target as Node)) setSkillMenu(false);
+    };
+    document.addEventListener('mousedown', onDown);
+    return () => document.removeEventListener('mousedown', onDown);
+  }, [skillMenu]);
+  const filteredSkills = skills.filter((s) =>
+    (s.name + s.description).toLowerCase().includes(skillSearch.toLowerCase()));
+  // 拖文件进输入框：之前这块没有 drop handler，文件冒泡到页面默认行为，
+  // Electron 直接把窗口导航到那个文件（看起来就是「自动打开了」）。
+  const [dragging, setDragging] = useState(false);
+  const [handoffOpen, setHandoffOpen] = useState(false);
+
+  return (
+    <div className="composer-wrap">
+      {handoffDraft && (
+        <div className={'handoff-draft-card' + (handoffOpen ? ' open' : '')}>
+          <div className="handoff-draft-head">
+            <ArrowRightLeft size={13} className="handoff-icon" />
+            <span className="handoff-draft-title">
+              承接自
+              {onOpenHandoffSource ? (
+                <button type="button" className="handoff-source-link" onClick={() => onOpenHandoffSource(handoffDraft.fromSessionId)}>
+                  「{handoffDraft.fromTitle}」
+                </button>
+              ) : `「${handoffDraft.fromTitle}」`}
+            </span>
+            <div className="handoff-draft-meta">
+              {handoffDraft.changedFiles?.length ? <span>改动 {handoffDraft.changedFiles.length} 文件</span> : null}
+              {handoffDraft.pendingTodos?.length ? <span>{handoffDraft.pendingTodos.length} 项待办</span> : null}
+              {handoffDraft.activeDaemons?.length ? <span>{handoffDraft.activeDaemons.length} 个常驻服务</span> : null}
+            </div>
+            <button type="button" className="handoff-draft-toggle" onClick={() => setHandoffOpen((v) => !v)}>
+              {handoffOpen ? '收起' : '查看 / 编辑'}
+              <ChevronDown size={12} className={handoffOpen ? 'rot' : ''} />
+            </button>
+            {onClearHandoffDraft && (
+              <button type="button" className="handoff-draft-close" title="移除交接单" onClick={onClearHandoffDraft}>
+                <X size={13} />
+              </button>
+            )}
+          </div>
+          {handoffOpen && (
+            <div className="handoff-draft-body">
+              <textarea
+                className="handoff-editor"
+                value={handoffDraft.summary}
+                onChange={(e) => onUpdateHandoffDraft?.(e.target.value)}
+                rows={8}
+                placeholder="编辑交接单内容，发送首条消息时将作为上下文交给新会话…"
+              />
+              <div className="handoff-draft-tip">提示：发送首条消息时将自动注入交接单；Agent 也可按需用 search_parent_session 回查原会话细节。</div>
+            </div>
+          )}
+        </div>
+      )}
+      <div
+        className={'composer' + (dragging ? ' dragging' : '')}
+        onDragOver={(e) => {
+          if (!e.dataTransfer.types.includes('Files')) return;
+          e.preventDefault();
+          setDragging(true);
+        }}
+        onDragLeave={(e) => {
+          // 拖进内部子元素也会触发 dragleave，不判断的话边框会闪
+          if (e.currentTarget.contains(e.relatedTarget as Node | null)) return;
+          setDragging(false);
+        }}
+        onDrop={(e) => {
+          setDragging(false);
+          // 内层（编辑器）已经处理过了，这里只管重置拖拽态
+          if (e.defaultPrevented) return;
+          e.preventDefault();
+          if (e.dataTransfer.files.length) onAddFiles(e.dataTransfer.files);
+        }}
+      >
+        <ComposerEditor
+          value={input}
+          attachments={attachments}
+          onChange={onInput}
+          onSend={onSend}
+          onRemoveAttachment={onRemoveFile}
+          onRestoreAttachment={onRestoreAttachment}
+          onSkillPaste={onSkillPaste}
+          onDropFiles={(files) => {
+            setDragging(false);
+            onAddFiles(files);
+          }}
+          placeholder={isImageModel ? '描述你想画的图…  Enter 生成（可附图片做图生图）' : '给 Paw 发消息…  Enter 发送，Shift+Enter 换行'}
+          compactCompletion={!readingFiles && !attachments.length}
+          disabled={busy || compacting}
+          focusRef={focusRef}
+        />
+        {/* 技能 chips 仍在框内上方（它不是正文的一部分，只是本条消息的开关） */}
+        {selectedSkills.length > 0 && (
+          <div className="attach-list">
+            {selectedSkills.map((id) => (
+              <span className="attach-chip skill-chip" key={`s-${id}`} title="已选技能，发送时注入完整指令">
+                <Sparkles size={12} /> {id}
+                <button onClick={() => onToggleSkill(id)} title="移除技能"><X size={11} /></button>
+              </span>
+            ))}
+          </div>
+        )}
+        <div className="composer-bar">
+          <input ref={fileRef} type="file" multiple hidden
+            onChange={(e) => { onAddFiles(e.target.files); e.target.value = ''; focusRef.current?.focus(); }} />
+          <button type="button" className="attach-btn" disabled={busy} onClick={() => fileRef.current?.click()} title="上传文件">
+            <Paperclip size={15} />
+          </button>
+          {/* 技能选择按钮 + 下拉 */}
+          <div className="skill-wrap" ref={skillWrapRef}>
+            <button className={'attach-btn' + (selectedSkills.length ? ' active' : '')}
+              onClick={() => setSkillMenu((v) => !v)} title="选择技能">
+              <Sparkles size={15} />
+            </button>
+            {skillMenu && (
+              <div className="skill-menu popup-up">
+                <input autoFocus value={skillSearch} onChange={(e) => setSkillSearch(e.target.value)} placeholder="搜索技能…" />
+                <div className="skill-list">
+                  {filteredSkills.map((s) => (
+                    <button key={s.id} className={'skill-opt' + (selectedSkills.includes(s.id) ? ' selected' : '')}
+                      onClick={() => onToggleSkill(s.id)}>
+                      <span><strong>{s.name}</strong><small>{s.description.slice(0, 50)}</small></span>
+                      {selectedSkills.includes(s.id) && <Check size={13} />}
+                    </button>
+                  ))}
+                  {filteredSkills.length === 0 && <div className="popup-hint">没有匹配的技能</div>}
+                </div>
+                {selectedSkills.length > 0 && <button className="skill-clear" onClick={() => { onClearSkills(); setSkillMenu(false); }}>清除已选</button>}
+              </div>
+            )}
+          </div>
+          {/* 系统连接选择：这条消息要不要指定一个连接 */}
+          <div className="skill-wrap conn-wrap" ref={connWrapRef}>
+            <button className={'attach-btn' + (selectedConnection ? ' active' : '')}
+              onClick={() => setConnMenu((v) => !v)} title="选择系统连接">
+              <Link2 size={15} />
+            </button>
+            {selectedConnection && (
+              <span className="conn-picked" onClick={() => setConnMenu(true)} title="点击更换">
+                {conns.find((c) => c.code === selectedConnection)?.name || selectedConnection}
+              </span>
+            )}
+            {connMenu && (
+              <div className="skill-menu popup-up conn-menu">
+                <div className="skill-list">
+                  {conns.map((c) => (
+                    <button key={c.code} className={'skill-opt' + (selectedConnection === c.code ? ' selected' : '')}
+                      onClick={() => { onSelectConnection(c.code); setConnMenu(false); }}>
+                      <span>
+                        <strong>{c.name}</strong>
+                        <small>{c.code} · {c.kind && c.kind !== 'http' ? c.kind.toUpperCase() : 'HTTP'}</small>
+                      </span>
+                      {selectedConnection === c.code && <Check size={13} />}
+                    </button>
+                  ))}
+                  {conns.length === 0 && <div className="popup-hint">还没有配置系统连接</div>}
+                </div>
+                {selectedConnection && (
+                  <button className="skill-clear" onClick={() => { onSelectConnection(null); setConnMenu(false); }}>
+                    不使用连接
+                  </button>
+                )}
+              </div>
+            )}
+          </div>
+          <WorkspacePicker variant="chip" />
+          <div className="composer-actions">
+            <ContextMeter key={`${contextSessionId}/${contextTurn?.id ?? ''}`} sessionId={contextSessionId}
+              turn={contextTurn} messages={contextMessages} live={contextReading}
+              disabled={busy || compacting} onCompact={onCompact} onHandoff={onHandoff} />
+            <ModelMenu
+              model={model} models={models} open={modelMenu} search={modelSearch} refreshing={modelsRefreshing}
+              onToggle={onToggleModel} onClose={onCloseModel} onSearch={onModelSearch} onSelect={onSelectModel}
+            />
+            {busy ? (
+              <button className="send-btn stop" onClick={onStop} title="停止">
+                <Square size={13} fill="currentColor" />
+              </button>
+            ) : (
+              <button className="send-btn" onClick={() => onSend(input)} disabled={compacting || readingFiles || (!input.trim() && !attachments.length && !handoffDraft)} title={readingFiles ? '正在读取附件…' : '发送'}>
+                <ArrowUp size={16} />
+              </button>
+            )}
+          </div>
+        </div>
+      </div>
+      <div className="footnote">内容由 AI 生成，重要信息请核对 Sources 链接</div>
+    </div>
+  );
+}

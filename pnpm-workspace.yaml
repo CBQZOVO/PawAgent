@@ -1,0 +1,10 @@
+packages:
+  - shared
+  - kernel
+  - server
+  - web
+  - desktop
+allowBuilds:
+  electron: true
+  node-pty: true
+  esbuild: true

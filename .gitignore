@@ -1,0 +1,16 @@
+node_modules/
+dist/
+desktop/.local/
+.env
+*.log
+.DS_Store
+web/.vite/
+server/search-config.json
+server/workspace-config.json
+server/data/
+data/
+.workbuddy
+.codebuddy
+.playwright-cli
+office/editor_sdk
+office/editor_sdk.part

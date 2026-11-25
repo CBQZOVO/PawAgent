@@ -1,0 +1,87 @@
+/* ==========================================================================
+   IDE 界面配色（Farris Theme）+ 终端配色。
+   语法着色已交给 Monaco 自带主题（vs / vs-dark），这里只管 IDE 外壳：
+   文件树、标签页、状态栏、内置终端的 --gh-* 变量。
+   ========================================================================== */
+:root {
+  --gh-bg: #ffffff;
+  --gh-fg: #2d2f33;
+  --gh-fg-muted: #747b8b;
+  --gh-canvas-inset: #f7f8fb;
+  --gh-border: #e6e9f0;
+  --gh-tabs-bg: #f1f3f7;
+  --gh-tab-active-bg: #ffffff;
+  --gh-tab-active-fg: #2d2f33;
+  --gh-tab-inactive-fg: #848c9a;
+  --gh-tab-accent: #2a87ff;
+  --gh-ln: #b4bccc;
+  --gh-ln-active: #424347;
+  --gh-line-hi: #e8f2ff8c;
+  --gh-list-active: #dbe9ff;
+  --gh-list-hover: #e8f2ff;
+  --gh-scroll: #ccd1dd99;
+  --gh-scroll-hover: #ccd1ddd9;
+  --gh-scroll-active: #ccd1dd;
+  --gh-focus: #2a87ff;
+  --gh-link: #2a87ff;
+  --gh-widget: #ffffff;
+  --gh-term-fg: #2d2f33;
+  --gh-term-black: #303c53;
+  --gh-term-red: #f46160;
+  --gh-term-green: #6cc77f;
+  --gh-term-yellow: #f5a144;
+  --gh-term-blue: #2a87ff;
+  --gh-term-magenta: #8b82ff;
+  --gh-term-cyan: #62cbcd;
+  --gh-term-white: #a8adb8;
+  --gh-term-bblack: #848c9a;
+  --gh-term-bred: #f9b0af;
+  --gh-term-bgreen: #b5e3bf;
+  --gh-term-byellow: #fad0a1;
+  --gh-term-bblue: #529dff;
+  --gh-term-bmagenta: #8b82ff;
+  --gh-term-bcyan: #62cbcd;
+  --gh-term-bwhite: #ffffff;
+}
+
+[data-editor-theme="dark"] {
+  --gh-bg: #333337;
+  --gh-fg: #fff;
+  --gh-fg-muted: rgba(255,255,255,0.65);
+  --gh-canvas-inset: #39393C;
+  --gh-border: #555558;
+  --gh-tabs-bg: #404044;
+  --gh-tab-active-bg: #333337;
+  --gh-tab-active-fg: #fff;
+  --gh-tab-inactive-fg: rgba(255,255,255,0.45);
+  --gh-tab-accent: #3D92FF;
+  --gh-ln: rgba(255,255,255,0.3);
+  --gh-ln-active: rgba(255,255,255,0.85);
+  --gh-line-hi: rgba(255,255,255,0.06);
+  --gh-list-active: #3D92FF33;
+  --gh-list-hover: rgba(255,255,255,0.05);
+  --gh-scroll: #74747799;
+  --gh-scroll-hover: #747477d9;
+  --gh-scroll-active: #747477;
+  --gh-focus: #3D92FF;
+  --gh-link: #3D92FF;
+  --gh-widget: #323236;
+  --gh-term-fg: #fff;
+  --gh-term-black: #5B5B5F;
+  --gh-term-red: #F15E5D;
+  --gh-term-green: #5FC875;
+  --gh-term-yellow: #FF9626;
+  --gh-term-blue: #3D92FF;
+  --gh-term-magenta: #8b82ff;
+  --gh-term-cyan: #58CACC;
+  --gh-term-white: #A8ADB8;
+  --gh-term-bblack: rgba(255,255,255,0.45);
+  --gh-term-bred: #793F41;
+  --gh-term-bgreen: #3F694B;
+  --gh-term-byellow: #7F552B;
+  --gh-term-bblue: #0E6DED;
+  --gh-term-bmagenta: #8b82ff;
+  --gh-term-bcyan: #58CACC;
+  --gh-term-bwhite: #fff;
+}
+

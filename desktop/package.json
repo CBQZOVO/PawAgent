@@ -1,0 +1,15 @@
+{
+  "name": "@paw/desktop",
+  "version": "0.1.0",
+  "private": true,
+  "productName": "Paw",
+  "description": "Paw Electron 桌面壳：内嵌 server + 原生能力（选文件夹/本地工具 IPC）",
+  "main": "src/main.cjs",
+  "scripts": {
+    "start": "node scripts/run.cjs",
+    "dev": "node scripts/run.cjs"
+  },
+  "devDependencies": {
+    "electron": "^33.2.0"
+  }
+}
