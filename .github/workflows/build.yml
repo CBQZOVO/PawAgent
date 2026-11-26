@@ -21,12 +21,12 @@ jobs:
         include:
           - os: macos-latest          # arm64
             script: ./build-app.sh
-            artifact: Paw-macos-arm64
-            archive-path: /tmp/paw-pack/Paw-macos-arm64.zip
+            target: macos-arm64
+            archive-dir: /tmp/paw-pack
           - os: windows-latest        # x64
             script: ./build-app.ps1
-            artifact: Paw-windows-x64
-            archive-path: pack/Paw-windows-x64.zip
+            target: windows-x64
+            archive-dir: pack
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
@@ -38,6 +38,25 @@ jobs:
           node-version: 24
           cache: pnpm
 
+      - name: 校验并提取版本号
+        shell: bash
+        run: |
+          node -e '
+            const fs = require("node:fs");
+            const pkgVer = JSON.parse(fs.readFileSync("package.json", "utf8")).version;
+            const ref = process.env.GITHUB_REF || "";
+            const refName = process.env.GITHUB_REF_NAME || "";
+            if (ref.startsWith("refs/tags/v")) {
+              const tagVer = refName.slice(1);
+              if (pkgVer !== tagVer) {
+                console.error(`::error::Tag (${refName}) 与 package.json version (${pkgVer}) 不一致，请先更新 package.json 再打 tag`);
+                process.exit(1);
+              }
+            }
+            fs.appendFileSync(process.env.GITHUB_ENV, `APP_VERSION=v${pkgVer}\n`);
+            console.log(`→ 构建版本：v${pkgVer}`);
+          '
+
       - name: 安装依赖
         run: pnpm install --frozen-lockfile
 
@@ -45,7 +64,7 @@ jobs:
         if: runner.os == 'macOS'
         run: |
           ${{ matrix.script }}
-          ditto -c -k --sequesterRsrc --keepParent /tmp/paw-pack/Paw-darwin-arm64/Paw.app "${{ matrix.archive-path }}"
+          ditto -c -k --sequesterRsrc --keepParent /tmp/paw-pack/Paw-darwin-arm64/Paw.app "${{ matrix.archive-dir }}/Paw-${{ env.APP_VERSION }}-${{ matrix.target }}.zip"
         env:
           PAW_NO_INSTALL: '1'
 
@@ -54,13 +73,13 @@ jobs:
         shell: pwsh
         run: |
           ${{ matrix.script }}
-          Compress-Archive -Path pack/Paw-win32-x64 -DestinationPath "${{ matrix.archive-path }}" -Force
+          Compress-Archive -Path pack/Paw-win32-x64 -DestinationPath "${{ matrix.archive-dir }}/Paw-${{ env.APP_VERSION }}-${{ matrix.target }}.zip" -Force
 
       - name: 上传产物
         uses: actions/upload-artifact@v4
         with:
-          name: ${{ matrix.artifact }}
-          path: ${{ matrix.archive-path }}
+          name: Paw-${{ env.APP_VERSION }}-${{ matrix.target }}
+          path: ${{ matrix.archive-dir }}/Paw-${{ env.APP_VERSION }}-${{ matrix.target }}.zip
           retention-days: 14
 
   release:
