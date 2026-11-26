@@ -44,14 +44,15 @@ function startServer() {
     const devTsxCli = path.join(ROOT, 'server/node_modules/tsx/dist/cli.mjs');
     const useBuilt = fs.existsSync(builtIndex);
     // 用随包携带的 node 二进制，不用 process.execPath（那是 Electron 本体，跑 .mjs 会被当 app 启动）；
-    // 开发时没这个内置 node，回落到 PATH 里的 node。
-    const bundledNode = path.join(ROOT, 'runtime/node');
+    // 开发时没这个内置 node，回落到 PATH 里的 node。Windows 的二进制叫 node.exe。
+    const bundledNode = path.join(ROOT, 'runtime', process.platform === 'win32' ? 'node.exe' : 'node');
     const nodeExe = fs.existsSync(bundledNode) ? bundledNode : 'node';
     const serverArgs = useBuilt ? [builtIndex] : [devTsxCli, 'src/index.ts'];
     // server 会自行读取 ~/.paw/gateway-config.json（优先于环境变量 GATEWAY_URL/GATEWAY_KEY）
     serverProc = spawn(nodeExe, serverArgs, {
       cwd: path.join(ROOT, 'server'),
       env: { ...process.env, PORT: String(SERVER_PORT) },
+      windowsHide: true,
       stdio: ['ignore', 'pipe', 'pipe'],
     });
     // 从 Finder 双击启动时 process.stdout 管道不存在，直接 write 会 EPIPE 崩主进程。
@@ -212,6 +213,7 @@ ipcMain.handle('paw:notify', (_e, payload) => {
 });
 
 app.whenReady().then(async () => {
+  if (process.platform === 'win32') app.setAppUserModelId('com.paw.desktop');
   if (process.platform === 'darwin') app.dock.setIcon(APP_ICON);
   await createWindow();
 });

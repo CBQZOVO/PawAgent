@@ -117,7 +117,7 @@ export async function executeWorklogTool(name: string, args: Record<string, unkn
   if (!logs.length) return '（这个范围没有工作日志）';
   const proj = (ws: string) => {
     if (!ws) return '（无项目）';
-    const segs = ws.split('/').filter(Boolean);
+    const segs = ws.split(/[\\/]/).filter(Boolean);
     return segs[segs.length - 1] || ws;
   };
   return logs.map((l) =>

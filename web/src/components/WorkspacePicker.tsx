@@ -49,7 +49,7 @@ export default function WorkspacePicker({ variant = 'chip' }: { variant?: 'plus'
       if (root) { await setWorkspace(root); setAdding(false); setQuery(''); load(); if (!keepOpen) setOpen(false); }
     } finally { setPicking(false); }
   };
-  const basename = (p: string) => p.split('/').filter(Boolean).slice(-1)[0] || p;
+  const basename = (p: string) => p.split(/[\\/]/).filter(Boolean).slice(-1)[0] || p;
   // 搜索过滤已添加的工作区
   const workspaces = (info?.workspaces || []).filter((p) => !query || p.toLowerCase().includes(query.toLowerCase()));
 

@@ -1,4 +1,4 @@
-// create_skill：把一套可复用的流程沉淀成技能（写到 ~/pawskill/<name>/SKILL.md）。
+// create_skill：把一套可复用的流程沉淀成技能（写到 ~/.paw/skill/<name>/SKILL.md）。
 //
 // 对标 skill-cli 的 `init` + `lint`，以及 WorkBuddy 的 skill-creator：
 // 重点是**告诉模型什么时候该建技能、描述该怎么写**——技能能不能被正确触发，
@@ -10,7 +10,7 @@ export const SKILL_TOOL_SCHEMAS: ToolSchema[] = [
   {
     name: 'create_skill',
     description: [
-      'Save a reusable procedure as a skill under ~/pawskill, so future conversations can load and follow it.',
+      'Save a reusable procedure as a skill under ~/.paw/skill, so future conversations can load and follow it.',
       '',
       'When to use:',
       '- The user says "save this as a skill" / "把这套流程存成技能" / "下次也这么做"',

@@ -6,10 +6,10 @@ Paw 通过 `SKILL.md` 将可复用的工作流程沉淀为本地技能，供 Age
 
 ## 1. 目录结构
 
-默认扫描用户目录 `~/pawskill/`（可通过环境变量 `PAW_SKILLS_DIR` 覆盖），采用扁平目录布局，每个子目录对应一个技能：
+默认扫描用户目录 `~/.paw/skill/`（可通过环境变量 `PAW_SKILLS_DIR` 覆盖），采用扁平目录布局，每个子目录对应一个技能：
 
 ```text
-~/pawskill/
+~/.paw/skill/
 └── release-check/
     ├── SKILL.md          # 必需：YAML frontmatter + Markdown 正文
     ├── references/       # 可选：参考文档、接口规范
@@ -41,7 +41,7 @@ version: 1.0.0
 
 ## 2. 使用方式
 
-- **自动触发**：Paw 按 `mtime` 缓存扫描 `~/pawskill/*/SKILL.md`，将名称与描述注入上下文；命中任务时，Agent 使用 `read_file` 按需读取完整 `SKILL.md`。
+- **自动触发**：Paw 按 `mtime` 缓存扫描 `~/.paw/skill/*/SKILL.md`，将名称与描述注入上下文；命中任务时，Agent 使用 `read_file` 按需读取完整 `SKILL.md`。
 - **手动指定**：在输入框工具栏选择指定技能，Paw 会将去掉 frontmatter 后的正文直接注入本轮 `<selected_skills>`。
 
 ---

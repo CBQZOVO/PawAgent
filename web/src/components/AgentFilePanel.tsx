@@ -102,7 +102,7 @@ export function collectPreviewFiles(messages: ViewMessage[]): PreviewFile[] {
         const paths = Array.isArray(raw) ? raw : [raw];
         for (const p of paths) {
           if (typeof p !== 'string' || !p) continue;
-          const name = p.split('/').pop() || p;
+          const name = p.split(/[\\/]/).pop() || p;
           if (!map.has(name)) map.set(name, { key: name, name, path: p, source: 'tool' });
         }
       }
@@ -155,7 +155,7 @@ export default function AgentFilePanel({ files, root, editorTheme, onAddToChat, 
       setOpenKeys((prev) => prev.includes(key) ? prev : [...prev, key]);
     } else if (previewRequest.path) {
       const p = previewRequest.path;
-      key = p.split('/').pop() || p;
+      key = p.split(/[\\/]/).pop() || p;
       // 工具文件通常已在 files 里；万一没有（历史会话），补一个带 path 的条目
       const existing = allFiles.find((f) => f.key === key || f.path === p);
       if (existing) key = existing.key;
@@ -189,7 +189,7 @@ export default function AgentFilePanel({ files, root, editorTheme, onAddToChat, 
         {openKeys.map((k) => {
           const f = allFiles.find((x) => x.key === k);
           if (!f) return null;
-          const base = f.name.split('/').pop() || f.name;
+          const base = f.name.split(/[\\/]/).pop() || f.name;
           return (
             <div key={k} className={'afp-tab' + (k === activeKey ? ' active' : '')} onClick={() => setActiveKey(k)} title={f.path || f.name}>
               <FileBadge name={f.name} />
@@ -215,7 +215,7 @@ export default function AgentFilePanel({ files, root, editorTheme, onAddToChat, 
                 <button key={f.key} className="afp-home-row" onClick={() => openFile(f)} title={f.path || f.name}>
                   <FileBadge name={f.name} />
                   <span className="afp-home-text">
-                    <span className="afp-home-name">{f.name.split('/').pop() || f.name}</span>
+                    <span className="afp-home-name">{f.name.split(/[\\/]/).pop() || f.name}</span>
                     {f.name.includes('/') && <span className="afp-home-path">{f.name}</span>}
                   </span>
                   <span className={'afp-home-src ' + f.source}>{f.source === 'tool' ? 'Agent' : '附件'}</span>
@@ -256,9 +256,10 @@ function FilePreview({ file, root, editorTheme, cache, loadTick, onReload, onCac
   // 磁盘文件：root 用「文件所在目录」——工具能读绝对路径，但 fs 接口强制 root 隔离；
   // 会话工作区可能是别的项目（工具跨工作区改文件），直接用 active.workspace 会「路径越界」→ 空白。
   // 文件所在目录当 root + 文件名当 path，一定在根内，语义就是读这个绝对路径文件。
-  const isAbs = !!file.path && file.path.startsWith('/');
-  const fsRoot = isAbs ? file.path!.slice(0, file.path!.lastIndexOf('/')) : root;
-  const fsPath = isAbs ? (file.path!.split('/').pop() || file.path!) : file.path!;
+  const isAbs = !!file.path && (file.path.startsWith('/') || /^[a-zA-Z]:[\\/]/.test(file.path));
+  const lastSep = file.path ? Math.max(file.path.lastIndexOf('/'), file.path.lastIndexOf('\\')) : -1;
+  const fsRoot = isAbs && lastSep >= 0 ? file.path!.slice(0, lastSep || 1) : root;
+  const fsPath = isAbs ? (file.path!.split(/[\\/]/).pop() || file.path!) : file.path!;
 
   // 工作区文件：从磁盘读全文（第一次 / 手动刷新）
   useEffect(() => {

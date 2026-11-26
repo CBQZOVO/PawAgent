@@ -34,44 +34,62 @@ const CONDA_BASE_DIRS = [
  * 只认磁盘上真实存在的目录，不 spawn conda（那要几百毫秒）。找不到返回 null。
  */
 function findCondaBase(): string | null {
+  const isWin = process.platform === 'win32';
   const candidates = [...CONDA_BASE_DIRS];
+  if (isWin && process.env.LOCALAPPDATA) {
+    candidates.push(
+      path.join(process.env.LOCALAPPDATA, 'anaconda3'),
+      path.join(process.env.LOCALAPPDATA, 'miniconda3'),
+      path.join(process.env.LOCALAPPDATA, 'miniforge3'),
+    );
+  }
   try {
     const txt = readFileSync(path.join(homedir(), '.conda', 'environments.txt'), 'utf-8');
-    for (const line of txt.split('\n')) {
+    for (const line of txt.split(/\r?\n/)) {
       const dir = line.trim();
-      if (dir && dir.startsWith('/') && !candidates.includes(dir)) candidates.push(dir);
+      const isAbs = isWin ? /^[a-zA-Z]:[\\/]/.test(dir) : dir.startsWith('/');
+      if (dir && isAbs && !candidates.includes(dir)) candidates.push(dir);
     }
   } catch { /* 没注册表，只靠静态列表 */ }
   for (const dir of candidates) {
-    if (existsSync(path.join(dir, 'bin', 'conda'))) return dir;
+    if (isWin) {
+      if (existsSync(path.join(dir, 'Scripts', 'conda.exe'))) return dir;
+    } else if (existsSync(path.join(dir, 'bin', 'conda'))) {
+      return dir;
+    }
   }
   return null;
 }
 
-/**
- * 补齐桌面端（launchd 启动）缺失的 Homebrew / 用户命令目录。
- * 保留最前面显式激活的虚拟环境路径（venv/conda/nvm/pyenv），把缺失的常用目录插在系统 /usr/bin 之前，
- * 避免 macOS 上找不到 brew/unar/7zz 或落回老旧的 Xcode /usr/bin/python3。
- *
- * Python 解析顺序（保证每次会话一致，不再随机挑解释器）：
- * 已激活的 venv/conda 环境 > 本机 Conda base（磁盘探测）> Homebrew / 用户目录 > 系统。
- * PATH 里已有 conda 目录就不再重复插。
- */
 export function buildShellEnv(): NodeJS.ProcessEnv {
-  const raw = process.env.PATH || '/usr/bin:/bin:/usr/sbin:/sbin';
+  const isWin = process.platform === 'win32';
+  const pathKey = Object.keys(process.env).find((k) => k.toLowerCase() === 'path') || 'PATH';
+  const raw = process.env[pathKey] || (isWin ? '' : '/usr/bin:/bin:/usr/sbin:/sbin');
   const parts = raw.split(path.delimiter).filter(Boolean);
-  const seen = new Set(parts);
-  const missing = EXTRA_PATH_DIRS.filter((d) => !seen.has(d) && existsSync(d));
+  const seen = new Set(isWin ? parts.map((p) => p.toLowerCase()) : parts);
+  const hasDir = (d: string) => seen.has(isWin ? d.toLowerCase() : d);
+
+  const extraDirs = isWin
+    ? [path.join(homedir(), '.local', 'bin'), path.join(homedir(), '.cargo', 'bin')]
+    : EXTRA_PATH_DIRS;
+  const missing = extraDirs.filter((d) => !hasDir(d) && existsSync(d));
   if (!missing.length && parts.some((d) => /conda|anaconda|miniconda|miniforge/i.test(d))) return process.env;
 
   let insertAt = 0;
   while (insertAt < parts.length && /venv|conda|nvm|pyenv|fnm|volta/i.test(parts[insertAt])) insertAt++;
   const toInsert: string[] = [...missing];
   const condaBase = findCondaBase();
-  if (condaBase && !seen.has(path.join(condaBase, 'bin'))) toInsert.unshift(path.join(condaBase, 'bin'));
+  if (condaBase) {
+    const condaBins = isWin
+      ? [condaBase, path.join(condaBase, 'Scripts'), path.join(condaBase, 'Library', 'bin')]
+      : [path.join(condaBase, 'bin')];
+    for (const b of condaBins.reverse()) {
+      if (existsSync(b) && !hasDir(b)) toInsert.unshift(b);
+    }
+  }
   if (!toInsert.length) return process.env;
   const merged = [...parts.slice(0, insertAt), ...toInsert, ...parts.slice(insertAt)];
-  return { ...process.env, PATH: merged.join(path.delimiter) };
+  return { ...process.env, [pathKey]: merged.join(path.delimiter) };
 }
 
 interface Job {
@@ -158,10 +176,11 @@ export function startBackgroundJob(
   evictOldJobs();
   const daemon = opts?.daemon === true;
   const id = `job-${++seq}-${Date.now().toString(36)}`;
-  // detached：sh 自己当进程组 leader，kill(-pid) 才能把 sh 派生的整棵树带走
-  // （直接 proc.kill 只杀 sh，pnpm dev 这类孙进程会变孤儿继续跑，占端口占内存）
+  // POSIX 用 detached 当进程组 leader 便于 kill(-pid)；Windows 不开 detached 且设 windowsHide 避免弹黑框
   const proc = spawn(cmd, {
-    shell: true, cwd, env: buildShellEnv(), detached: true,
+    shell: true, cwd, env: buildShellEnv(),
+    detached: process.platform !== 'win32',
+    windowsHide: true,
     stdio: ['ignore', 'pipe', 'pipe'],
   });
   const job: Job = {
@@ -204,10 +223,20 @@ function jobHeader(j: Job): string {
   return `[${j.id}] ${j.status}${j.exitCode !== null ? ` (exit=${j.exitCode})` : ''}${pid}${tag} · ${secs.toFixed(1)}s · ${j.cmd}`;
 }
 
-/** 杀整个进程组（配合 detached）：失败退回只杀直接子进程 */
+/** 跨平台杀整棵进程树：Windows 走 taskkill /T /F，POSIX 走负 PID 进程组 */
+export function killProcessTree(pid: number, sig: NodeJS.Signals = 'SIGTERM'): void {
+  if (process.platform === 'win32') {
+    try {
+      spawn('taskkill', ['/PID', String(pid), '/T', '/F'], { windowsHide: true, stdio: 'ignore' });
+    } catch { /* 已退出 */ }
+    return;
+  }
+  try { process.kill(-pid, sig); } catch { try { process.kill(pid, sig); } catch { /* 已退出 */ } }
+}
+
 function killTree(proc: ChildProcess, sig: NodeJS.Signals): void {
   if (!proc.pid) return;
-  try { process.kill(-proc.pid, sig); } catch { try { proc.kill(sig); } catch { /* 已经退了 */ } }
+  killProcessTree(proc.pid, sig);
 }
 
 async function getOutput(args: Record<string, unknown>, signal?: AbortSignal): Promise<string> {

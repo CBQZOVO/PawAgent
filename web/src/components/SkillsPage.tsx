@@ -58,7 +58,7 @@ export default function SkillsPage() {
           ))}
           {skills.length === 0 && (
             <div className="side-empty">
-              还没有技能。往 ~/pawskill 里放带 SKILL.md 的文件夹，或者直接跟 Agent 说
+              还没有技能。往 ~/.paw/skill 里放带 SKILL.md 的文件夹，或者直接跟 Agent 说
               「把这套流程存成技能」。
             </div>
           )}

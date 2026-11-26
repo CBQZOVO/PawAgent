@@ -355,7 +355,7 @@ host.connections.registerAuthProvider({
 | --- | --- | --- |
 | `host.sessions` | `list()` / `get(id)` | 只读检索会话摘要列表与完整消息记录 |
 | `host.tasks` | `list()` / `get(id)` / `listRuns(taskId?, limit?)` | 只读查询定时任务与运行历史 |
-| `host.skills` | `list()` / `read(id)` | 列出 `~/pawskill` 下的技能并读取正文 |
+| `host.skills` | `list()` / `read(id)` | 列出 `~/.paw/skill` 下的技能并读取正文 |
 | `host.notify` | `notify(text)` | 弹出本机系统桌面通知 |
 
 ---

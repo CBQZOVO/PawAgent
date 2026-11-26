@@ -581,7 +581,8 @@ export default function App() {
           if (start) {
             const p = String(start.path || '');
             if (p) {
-              const abs = p.startsWith('/') ? p : (ws ? ws.replace(/\/$/, '') + '/' + p : p);
+              const isAbs = p.startsWith('/') || /^[a-zA-Z]:[\\/]/.test(p);
+              const abs = isAbs ? p : (ws ? ws.replace(/[\\/]+$/, '') + '/' + p : p);
               setChangedFiles((prev) => new Set(prev).add(abs));
               setIdeReloadTick((t) => t + 1);
             }

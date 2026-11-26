@@ -17,7 +17,7 @@ import { generateHandoffBrief } from './agent/handoff.js';
 import { loadPersonaPrompt } from './persona.js';
 import { runAgent } from './agent/loop.js';
 import type { GatewayConfig } from './gateway/client.js';
-import { loadSkillContent, loadSkills } from './skills.js';
+import { loadSkillContent, loadSkills, SKILLS_DIR } from './skills.js';
 import { initMcp, mcpServerNames, mcpServerViews, mcpToolSchemas } from './mcp.js';
 import {
   getConnectionAuthProvider,
@@ -263,19 +263,32 @@ app.get('/api/office/preview', async (c) => {
 
 // IDE 终端：默认 shell / 起始目录 / 当前会话数（真正的连接走 /api/terminal 的 WebSocket）
 app.get('/api/terminal/info', async (c) => c.json(terminalInfo(c.req.query('cwd') || await getWorkspaceRoot())));
-// 弹出 macOS Finder 让用户选文件夹（返回选中路径；取消返回 null）
+// 弹出系统目录选择框让用户选文件夹（返回选中路径；取消返回 null）
 app.post('/api/workspace/pick', async (c) => {
   const { execFile } = await import('node:child_process');
   const { promisify } = await import('node:util');
   const run = promisify(execFile);
   try {
-    const script = [
-      'tell application "System Events" to activate',
-      'set theFolder to choose folder with prompt "选择 Paw 工作区目录"',
-      'return POSIX path of theFolder',
-    ].join('\n');
-    const { stdout } = await run('osascript', ['-e', script], { timeout: 120000 });
-    return c.json({ root: stdout.trim().replace(/\/$/, '') || null });
+    if (process.platform === 'win32') {
+      const ps = [
+        'Add-Type -AssemblyName System.Windows.Forms',
+        '$d = New-Object System.Windows.Forms.FolderBrowserDialog',
+        '$d.Description = "选择 Paw 工作区目录"',
+        'if ($d.ShowDialog() -eq [System.Windows.Forms.DialogResult]::OK) { Write-Output $d.SelectedPath }',
+      ].join('; ');
+      const { stdout } = await run('powershell.exe', ['-NoProfile', '-STA', '-Command', ps], { timeout: 120000, windowsHide: true });
+      return c.json({ root: stdout.trim().replace(/[\\/]+$/, '') || null });
+    }
+    if (process.platform === 'darwin') {
+      const script = [
+        'tell application "System Events" to activate',
+        'set theFolder to choose folder with prompt "选择 Paw 工作区目录"',
+        'return POSIX path of theFolder',
+      ].join('\n');
+      const { stdout } = await run('osascript', ['-e', script], { timeout: 120000 });
+      return c.json({ root: stdout.trim().replace(/\/$/, '') || null });
+    }
+    return c.json({ root: null });
   } catch {
     return c.json({ root: null }); // 用户取消或失败
   }
@@ -426,7 +439,7 @@ app.get('/api/skills', async (c) => {
   const skills = await loadSkills();
   return c.json({
     skills: skills.map((s) => ({ id: s.dir, name: s.name, description: s.description })),
-    dir: path.join(os.homedir(), 'pawskill'),
+    dir: SKILLS_DIR,
   });
 });
 app.get('/api/skills/:id/content', async (c) => {

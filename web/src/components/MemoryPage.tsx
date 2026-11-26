@@ -11,7 +11,7 @@ interface WorkLogItem { id: string; workspace: string; day: string; title: strin
 
 const projName = (ws: string) => {
   if (!ws) return '通用';
-  const segs = ws.split('/').filter(Boolean);
+  const segs = ws.split(/[\\/]/).filter(Boolean);
   return segs[segs.length - 1] || ws;
 };
 

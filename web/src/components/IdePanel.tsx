@@ -218,7 +218,7 @@ export default function IdePanel({ root, changedPaths, reloadTick, chatHidden, o
   useEffect(() => { void loadTree(); setTabs([]); setActivePath(null); setFile(null); }, [loadTree]);
 
   const openFile = useCallback(async (path: string) => {
-    const name = path.split('/').pop() || path;
+    const name = path.split(/[\\/]/).pop() || path;
     setTabs((prev) => prev.some((t) => t.path === path) ? prev : [...prev, { path, name }]);
     setActivePath(path);
     setFileLoading(true);
@@ -276,7 +276,7 @@ export default function IdePanel({ root, changedPaths, reloadTick, chatHidden, o
   const addEditorToChat = useCallback((start: number | null, end: number | null) => {
     if (!activePath || !file) return;
     if (start !== null && end !== null) { addCodeRef(start, end); return; }
-    void addEntryRef({ name: activePath.split('/').pop() || activePath, path: activePath, dir: false });
+    void addEntryRef({ name: activePath.split(/[\\/]/).pop() || activePath, path: activePath, dir: false });
   }, [activePath, file, addCodeRef, addEntryRef]);
 
   const onTreeContext = useCallback((e: React.MouseEvent, entry: FsEntry) => {
@@ -433,7 +433,7 @@ export default function IdePanel({ root, changedPaths, reloadTick, chatHidden, o
       <div className="ide-tree" ref={treeRef} style={treeHidden ? { display: 'none' } : undefined}>
         <div className="ide-tree-head">
           <Folder size={14} />
-          <span className="ide-tree-root" title={root}>{root.split('/').filter(Boolean).pop()}</span>
+          <span className="ide-tree-root" title={root}>{root.split(/[\\/]/).filter(Boolean).pop()}</span>
           <Tips label="刷新文件树">
             <button className="ide-icon-btn" aria-label="刷新文件树" onClick={() => void loadTree()}><RefreshCw size={14} /></button>
           </Tips>

@@ -282,7 +282,7 @@ export default function TerminalPanel({ cwd, onClose, height, onResize }: {
         </div>
         <span className={'term-status ' + (active?.status ?? 'closed')}>{statusLabel}</span>
         <span className="term-cwd" title={info?.cwd || ''}>
-          {info?.shellName || 'shell'} · {(info?.cwd || '').split('/').filter(Boolean).pop() || '~'}
+          {info?.shellName || 'shell'} · {(info?.cwd || '').split(/[\\/]/).filter(Boolean).pop() || '~'}
         </span>
         <Tips label="重连当前终端">
           <button className="term-icon-btn" aria-label="重连" disabled={!active}

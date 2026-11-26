@@ -1,7 +1,7 @@
 import { homedir } from 'node:os';
 import { spawn } from 'node:child_process';
 import type { PawPlugin, ToolSchema } from '@paw/kernel';
-import { BG_TOOL_SCHEMAS, buildShellEnv, executeBgTool, startBackgroundJob } from '../tools/background.js';
+import { BG_TOOL_SCHEMAS, buildShellEnv, executeBgTool, killProcessTree, startBackgroundJob } from '../tools/background.js';
 import { getWorkspaceRoot } from '../workspace.js';
 import type { ServerToolExecCtx } from './types.js';
 
@@ -13,7 +13,9 @@ function runShell(cmd: string, opts: {
 }): Promise<{ stdout: string; stderr: string }> {
   return new Promise((resolve, reject) => {
     const child = spawn(cmd, {
-      shell: true, cwd: opts.cwd, env: buildShellEnv(), detached: true,
+      shell: true, cwd: opts.cwd, env: buildShellEnv(),
+      detached: process.platform !== 'win32',
+      windowsHide: true,
       stdio: ['ignore', 'pipe', 'pipe'],
     });
     let out = '';
@@ -24,7 +26,7 @@ function runShell(cmd: string, opts: {
 
     const killGroup = (sig: NodeJS.Signals) => {
       if (!child.pid) return;
-      try { process.kill(-child.pid, sig); } catch { /* 已退出 */ }
+      killProcessTree(child.pid, sig);
     };
     const settle = (fn: () => void) => {
       if (settled) return;

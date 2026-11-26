@@ -70,7 +70,7 @@ pnpm dev
 | --- | --- |
 | [技术架构与运行时设计](./docs/architecture.md) | `@paw/kernel` 分层、ReAct 主循环、护栏、五层上下文管理、子代理与配置清单 |
 | [插件开发指南](./docs/plugin-development.md) | 外置插件开发、侧栏自定义页面、后端路由与 `PluginHostApi` 完整参考 |
-| [技能规范与创建指南](./docs/skills.md) | `~/pawskill` 技能目录规范、`SKILL.md` 格式与 `create_skill` |
+| [技能规范与创建指南](./docs/skills.md) | `~/.paw/skill` 技能目录规范、`SKILL.md` 格式与 `create_skill` |
 | [系统连接说明](./docs/connections.md) | 通用 HTTP 连接、`0600` 凭据隔离、SSRF 防护与插件协议扩展 |
 
 ## License

@@ -1,15 +1,15 @@
-// Skill 接入：扫描用户级 ~/pawskill/*/SKILL.md（可通过 PAW_SKILLS_DIR 覆盖），
+// Skill 接入：扫描用户级 ~/.paw/skill/*/SKILL.md（可通过 PAW_SKILLS_DIR 覆盖），
 // 解析 frontmatter 的 name/description，把清单注入 user-context。
 // 模型要用某个 skill 时，用内置 read_file 工具读它的 SKILL.md 全文照做。
 import { mkdir, readdir, readFile, stat, writeFile } from 'node:fs/promises';
 import path from 'node:path';
-import os from 'node:os';
+import { DATA_DIR } from './paths.js';
 
-// Paw 专用技能目录（独立于 WorkBuddy，避免混用；结构相同：每个子目录一个 SKILL.md）
+// Paw 专用技能目录（放在 ~/.paw/skill，重装不丢；结构：每个子目录一个 SKILL.md）
 // PAW_SKILLS_DIR 可覆盖（测试用临时目录，别往真技能目录里写垃圾）
-const SKILLS_DIR = process.env.PAW_SKILLS_DIR
+export const SKILLS_DIR = process.env.PAW_SKILLS_DIR
   ? path.resolve(process.env.PAW_SKILLS_DIR)
-  : path.join(os.homedir(), 'pawskill');
+  : path.join(DATA_DIR, 'skill');
 let listCache: { mtime: number; skills: SkillInfo[] } | null = null;
 let blockCache: { mtime: number; block: string } | null = null;
 

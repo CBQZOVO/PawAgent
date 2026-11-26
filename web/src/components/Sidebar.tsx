@@ -252,7 +252,7 @@ export default function Sidebar({
     void setWorkspace(ws);
     setWsOpen((p) => ({ ...p, [ws]: !p[ws] }));
   };
-  const wsShort = (p: string) => p.split('/').filter(Boolean).slice(-1)[0] || p;
+  const wsShort = (p: string) => p.split(/[\\/]/).filter(Boolean).slice(-1)[0] || p;
   const renderSession = (s: Session, nested = false) => {
     const busy = runningIds.has(s.id);
     const key = `session:${s.id}`;

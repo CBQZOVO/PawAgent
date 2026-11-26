@@ -282,7 +282,7 @@ export default function ToolCard({ tool, members, busy, stopped, onOpenSession, 
     });
     const isGroup = parts.length > 1;
     const rawPath = String(tool.args?.path ?? '');
-    const name = rawPath.split('/').pop() || rawPath || '文件';
+    const name = rawPath.split(/[\\/]/).pop() || rawPath || '文件';
     const isEdit = tool.name === 'edit_file';
     const added = parts.reduce((n, p) => n + p.diff.added, 0);
     const removed = parts.reduce((n, p) => n + p.diff.removed, 0);

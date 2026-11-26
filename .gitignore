@@ -13,4 +13,7 @@ data/
 .codebuddy
 .playwright-cli
 office/editor_sdk
+office/editor_sdk.exe
 office/editor_sdk.part
+office/editor_sdk.exe.part
+pack/

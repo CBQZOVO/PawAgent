@@ -5,7 +5,7 @@
  */
 
 export function extOf(path: string): string {
-  const base = (path.split('/').pop() || '').toLowerCase();
+  const base = (path.split(/[\\/]/).pop() || '').toLowerCase();
   if (base === 'dockerfile') return 'sh';
   if (base === 'makefile') return 'sh';
   if (base.startsWith('.') && !base.slice(1).includes('.')) return base.slice(1);

@@ -1,7 +1,7 @@
 // 文件写入/编辑/删除工具：write_file / edit_file / delete_file。
 // 对标 CodeBuddy 的 write_to_file / replace_in_file / delete_file——
 // 让 Agent 改代码不用整文件重写（省 token、少出错），删除走废纸篓可恢复。
-import { readFile, writeFile, mkdir, rename, stat } from 'node:fs/promises';
+import { copyFile, readFile, writeFile, mkdir, rename, stat, unlink } from 'node:fs/promises';
 import path from 'node:path';
 import os from 'node:os';
 import type { ToolSchema } from '@paw/shared';
@@ -113,11 +113,21 @@ async function deleteFileTool(p: string): Promise<string> {
   if (s.isDirectory()) throw new Error('delete_file 只删文件，不删目录（目录请用 run_command 谨慎处理）');
   const trashRoot = path.join(os.homedir(), '.paw-trash');
   const stamp = new Date().toISOString().replace(/[:.]/g, '-');
-  // 绝对路径去掉开头 /，保留目录层级，恢复时知道它原来在哪
-  const rel = p.replace(/^\//, '');
+  // 去掉开头的 / 或 Windows 盘符冒号（如 C:\foo → C/foo），保留目录层级以便人工恢复
+  const rel = p.replace(/^([a-zA-Z]):[\\/]+/, '$1/').replace(/^[\\/]+/, '');
   const dest = path.join(trashRoot, stamp, rel);
   await mkdir(path.dirname(dest), { recursive: true });
-  await rename(p, dest);
+  try {
+    await rename(p, dest);
+  } catch (e) {
+    // 跨盘符（如 Windows D:\ → C:\Users\...\.paw-trash）时 rename 会报 EXDEV，回退复制+删除
+    if ((e as NodeJS.ErrnoException)?.code === 'EXDEV') {
+      await copyFile(p, dest);
+      await unlink(p);
+    } else {
+      throw e;
+    }
+  }
   return `已删除 ${p}（移入废纸篓 ${dest}，可恢复）`;
 }
 

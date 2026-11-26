@@ -130,7 +130,7 @@ model: inherit
 | `PAW_MODEL` | 默认模型名（默认 `qwen4-max`）。 |
 | `PAW_DATA_DIR` | 覆盖默认数据目录 `~/.paw`。 |
 | `PAW_PLUGINS_DIR` | 覆盖默认外置插件目录 `~/.paw/plugins`。 |
-| `PAW_SKILLS_DIR` | 覆盖默认技能目录 `~/pawskill`。 |
+| `PAW_SKILLS_DIR` | 覆盖默认技能目录 `~/.paw/skill`。 |
 | `PAW_MAX_ROUNDS` | 覆盖主循环最大工具轮次（默认 `200`，最低 `4`）。 |
 | `SUBAGENT_TIMEOUT_MS` | 覆盖单个子代理超时毫秒数（默认 `1800000`，即 30 分钟）。 |
 | `PAW_OFFICE_URL` / `PAW_OFFICE_BIN` | 覆盖 Office 预览引擎下载地址或本地二进制路径；设 `PAW_OFFICE_AUTO_DOWNLOAD=0` 可关闭运行时自动下载。 |

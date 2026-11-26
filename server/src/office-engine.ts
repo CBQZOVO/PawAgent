@@ -79,7 +79,9 @@ export function officeDataDir(): string {
 }
 
 export function officeDownloadUrl(): string {
-  return process.env.PAW_OFFICE_URL?.trim() || DEFAULT_OFFICE_DOWNLOAD_URL;
+  if (process.env.PAW_OFFICE_URL?.trim()) return process.env.PAW_OFFICE_URL.trim();
+  // OSS 上两个平台是两个文件：editor_sdk（mac）和 editor_sdk.exe（Windows）
+  return process.platform === 'win32' ? `${DEFAULT_OFFICE_DOWNLOAD_URL}.exe` : DEFAULT_OFFICE_DOWNLOAD_URL;
 }
 
 function hasNonEmptyFile(p: string): boolean {
@@ -90,13 +92,18 @@ function hasNonEmptyFile(p: string): boolean {
   }
 }
 
-/** 优先显式覆盖（测试/自定义）；其次仓库或打包目录 office/editor_sdk；最后 ~/.paw/office/editor_sdk。 */
+/** editor_sdk 文件名按平台：Windows 为 editor_sdk.exe，macOS 为 editor_sdk */
+function editorBinaryName(): string {
+  return process.platform === 'win32' ? 'editor_sdk.exe' : 'editor_sdk';
+}
+
+/** 优先显式覆盖（测试/自定义）；其次仓库或打包目录 office/editor_sdk[.exe]；最后 ~/.paw/office/。 */
 export function resolveOfficeBinary(): string {
   const explicit = process.env.PAW_OFFICE_BIN?.trim();
   if (explicit) return explicit;
-  const packaged = path.resolve(HERE, '..', '..', 'office', 'editor_sdk');
+  const packaged = path.resolve(HERE, '..', '..', 'office', editorBinaryName());
   if (process.env.PAW_OFFICE_IGNORE_PACKAGED !== '1' && hasNonEmptyFile(packaged)) return packaged;
-  return path.join(officeDataDir(), 'office', 'editor_sdk');
+  return path.join(officeDataDir(), 'office', editorBinaryName());
 }
 
 /** 流式下载 editor_sdk 到目标路径，写入 .part 后原子重命名并赋 0755 执行权限。 */
@@ -213,6 +220,7 @@ async function start(): Promise<OfficeStatus> {
       `--log_dir=${logDir}`,
     ], {
       cwd: path.dirname(binary),
+      windowsHide: true,
       stdio: ['ignore', log ? 'pipe' : 'ignore', log ? 'pipe' : 'ignore'],
     });
   } catch (e) {

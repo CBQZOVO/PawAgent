@@ -43,11 +43,22 @@ function clampSize(n: unknown, def: number, max: number): number {
   return Number.isFinite(v) && v > 0 ? Math.min(Math.floor(v), max) : def;
 }
 
-/** 用户默认 shell：$SHELL 优先，其次 macOS 常见路径，最后 /bin/sh */
+/** 用户默认 shell：$SHELL 优先，其次 macOS 常见路径，最后 /bin/sh；Windows 用 PowerShell */
 export function defaultShell(): string {
+  if (process.platform === 'win32') {
+    return process.env.ComSpec && existsSync(process.env.ComSpec) ? process.env.ComSpec : 'powershell.exe';
+  }
   const candidates = [process.env.SHELL, '/bin/zsh', '/bin/bash', '/usr/bin/bash', '/bin/sh'];
   for (const c of candidates) if (c && existsSync(c)) return c;
   return '/bin/sh';
+}
+
+/** node-pty 启动参数：macOS/Linux 传 -i 读用户配置；Windows 仅 PowerShell 传 -NoLogo，cmd.exe 不传参 */
+function shellArgs(shell: string): string[] {
+  if (process.platform === 'win32') {
+    return /powershell|pwsh/i.test(shell) ? ['-NoLogo'] : [];
+  }
+  return ['-i'];
 }
 
 /** 会话数上限：本机 IDE 开十几个终端很正常，给个宽松上限防手滑开爆 */
@@ -92,7 +103,7 @@ export function attachTerminal(server: Server): void {
 
     let term: pty.IPty;
     try {
-      term = pty.spawn(shell, ['-i'], {
+      term = pty.spawn(shell, shellArgs(shell), {
         name: 'xterm-256color',
         cols, rows, cwd,
         // 完整继承环境：用户自己的 PATH / alias / nvm / ssh-agent 都要在

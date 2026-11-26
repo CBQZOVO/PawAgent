@@ -41,7 +41,7 @@ Paw 首个开源候选基线版本，完成了零依赖内核 `@paw/kernel` 抽�
 
 #### 系统连接、MCP、技能与网关
 - **通用 HTTP 系统连接**：支持 `none` / `bearer` / `header` / `basic` / `query` 认证、`call_api` 大文件 `body_file` 上传、连接实发探测与 SSRF 域名/前缀锁死；密钥独立存于 `~/.paw/secrets.json`（`0600` 权限，永不进模型上下文）；专有认证与页面 SSO 通过插件扩展。
-- **MCP、技能与定时任务**：支持 STDIO / Streamable HTTP MCP 客户端、本地 `~/pawskill/` 技能扫描与 `create_skill` 对话创建（含内置 lint 与路径穿越拦截）、cron 与双周定时任务调度。
+- **MCP、技能与定时任务**：支持 STDIO / Streamable HTTP MCP 客户端、本地 `~/.paw/skill/` 技能扫描与 `create_skill` 对话创建（含内置 lint 与路径穿越拦截）、cron 与双周定时任务调度。
 - **统一网关配置与登录页**：网关地址与密钥统一存储于 `~/.paw/gateway-config.json`（`0600`）；未配置 `GATEWAY_KEY` 时启动进入登录页，先请求 `/v1/models` 验证通过再落盘，登录失败可一键展开自定义 `GATEWAY_URL`。
 
 ### Documentation & Open-Source Readiness
