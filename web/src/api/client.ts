@@ -181,7 +181,7 @@ export interface ModelInfo {
   group: string;
 }
 
-export async function getModels(): Promise<{ models: ModelInfo[]; default: string; error?: string }> {
+export async function getModels(): Promise<{ models: ModelInfo[]; default?: string | null; error?: string }> {
   const r = await fetch('/api/models');
   return r.json();
 }

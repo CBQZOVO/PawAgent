@@ -395,7 +395,9 @@ app.get('/api/models', async (c) => {
     if (!r.ok) throw new Error(`gateway HTTP ${r.status}`);
     const d = (await r.json()) as { data?: Array<{ id: string; owned_by?: string; rate_multiplier?: number | null }> };
     const models = (d.data || []).map((m) => ({ id: m.id, group: m.owned_by || '其它', rate: m.rate_multiplier ?? null }));
-    return c.json({ models, default: cfg.model });
+    // default 只在网关真返回该模型时才给：本地配置的模型可能已没权限
+    const def = models.some((m) => m.id === cfg.model) ? cfg.model : (models[0]?.id ?? null);
+    return c.json({ models, default: def });
   } catch (e) {
     return c.json({ error: (e as Error).message, models: [], default: cfg.model }, 502);
   }

@@ -77,7 +77,8 @@ export default function App() {
   const titleCancelRef = useRef(false);
   // 「生成中」绑定到会话：切走会话后，旧会话的运行状态不会错画到当前会话上
   const [runningIds, setRunningIds] = useState<Set<string>>(new Set());
-  const [model, setModel] = useState('qwen4-max');
+  /** 空串 = 还没拿到可用模型列表。别硬编码模型名：没权限时按钮还挂着它，误导用户 */
+  const [model, setModel] = useState('');
   const [models, setModels] = useState<ModelInfo[]>([]);
   const [modelsRefreshing, setModelsRefreshing] = useState(false);
   const modelsRefreshingRef = useRef(false);
@@ -301,7 +302,9 @@ export default function App() {
       const d = await getModels();
       if (d.models?.length) {
         setModels(d.models);
-        setModel((prev) => d.models.some((m) => m.id === prev) ? prev : (d.default || d.models[0].id));
+        // 只从网关实际返回的列表里选：default 可能是本地配置的旧模型（没权限网关不返回它）
+        const fallback = d.models.some((m) => m.id === d.default) ? d.default! : d.models[0].id;
+        setModel((prev) => d.models.some((m) => m.id === prev) ? prev : fallback);
       } else if (!d.error) {
         setModels([]);
       }

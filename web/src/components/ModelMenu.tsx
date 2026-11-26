@@ -36,8 +36,9 @@ export default function ModelMenu({
     }, {});
   return (
     <div className="model-wrap" ref={wrapRef}>
-      <button className="model-btn" onClick={onToggle} title={model}>
-        <ModelLogo model={model} size={16} /><span className="model-btn-name">{model}</span><ChevronDown size={12} />
+      <button className="model-btn" onClick={onToggle} title={model || '模型不可用'}>
+        {model && <ModelLogo model={model} size={16} />}
+        <span className="model-btn-name">{model || '模型不可用'}</span><ChevronDown size={12} />
       </button>
       {open && (
         <div className="model-menu popup-up">
