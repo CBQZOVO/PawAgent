@@ -1,7 +1,7 @@
 {
   "name": "paw",
   "private": true,
-  "version": "1.0.0-rc.1",
+  "version": "1.0.0-rc.2",
   "packageManager": "pnpm@12.21.0",
   "description": "Paw — 本地工作区 AI Agent 桌面与 Web 应用（基于 @paw/kernel）",
   "scripts": {

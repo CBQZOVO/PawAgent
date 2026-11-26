@@ -4,6 +4,20 @@
 
 ---
 
+## [1.0.0-rc.2] - 2026-11-26
+
+### Added
+- **Windows (x64) 全面适配与打包**：新增 [build-app.ps1](./build-app.ps1)、[stage-app.mjs](./desktop/scripts/stage-app.mjs) 与 `Paw.ico`，补全 Windows 下的进程树终止（`taskkill`）、隐藏子进程黑窗（`windowsHide`）、PowerShell/cmd 终端参数、Conda/PATH 大小写探测、文件夹选择弹窗及前后端跨平台路径处理。
+- **GitHub Actions 双平台自动构建与 Release**：新增 [.github/workflows/build.yml](./.github/workflows/build.yml)，推送 `v*` tag 时自动并行打包 `Paw-v<version>-macos-arm64.zip` 与 `Paw-v<version>-windows-x64.zip`，校验 tag 与 `package.json` 版本一致后自动发布 GitHub Release。
+
+### Changed
+- **技能目录统一归拢**：默认技能目录从 `~/pawskill` 迁移至 `~/.paw/skill`（支持 `PAW_DATA_DIR` / `PAW_SKILLS_DIR` 覆盖）。
+
+### Fixed
+- 模型选择器仅展示网关实际返回的模型列表，避免硬编码默认模型在网关不可用时误导用户。
+
+---
+
 ## [1.0.0-rc.1] - 2026-11-25
 
 Paw 首个开源候选基线版本，完成了零依赖内核 `@paw/kernel` 抽离、免编译外置插件体系、五层上下文管理、独立上下文子代理、内置 IDE 与本地 Office 预览，以及完整开源清理。
