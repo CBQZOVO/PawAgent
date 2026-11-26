@@ -1,9 +1,9 @@
-# 双平台出包：macOS(arm64) + Windows(x64)，产物压为单文件 zip 上传 Artifact；
+# 双平台出包：macOS(arm64) .dmg + Windows(x64) Setup.exe 安装包，上传 Artifact；
 # 支持在 GitHub Actions 页面点击「Run workflow」直接输入版本号一键构建并自动发 Release，
 # 也支持推 v* tag 自动触发。无需手动修改仓库里的 package.json 版本号。
 # 说明：
-# - macOS 走 build-app.sh（PAW_NO_INSTALL=1 跳过本机安装），用 ditto 打包保留 .app 内部符号链接与权限；
-# - Windows 走 build-app.ps1，用 Compress-Archive 压成单文件 zip；
+# - macOS 走 build-app.sh（PAW_NO_INSTALL=1 跳过本机安装），用 hdiutil 打包带 Applications 快捷方式的 .dmg；
+# - Windows 走 build-app.ps1，用 Inno Setup（desktop/scripts/installer.iss）生成 Setup.exe 安装包；
 # - 产物未签名：Windows 首次运行会有 SmartScreen 提示，macOS 需右键 → 打开绕过 Gatekeeper。
 name: build-app
 
@@ -33,10 +33,12 @@ jobs:
             script: ./build-app.sh
             target: macos-arm64
             archive-dir: /tmp/paw-pack
+            ext: .dmg
           - os: windows-latest        # x64
             script: ./build-app.ps1
-            target: windows-x64
+            target: windows-x64-setup
             archive-dir: pack
+            ext: .exe
     runs-on: ${{ matrix.os }}
     env:
       NODE_OPTIONS: --max-old-space-size=4096
@@ -84,26 +86,47 @@ jobs:
       - name: 安装依赖
         run: pnpm install --frozen-lockfile
 
-      - name: 打包并压缩（macOS）
+      - name: 打包并生成 DMG（macOS）
         if: runner.os == 'macOS'
         run: |
           ${{ matrix.script }}
-          ditto -c -k --sequesterRsrc --keepParent /tmp/paw-pack/Paw-darwin-arm64/Paw.app "${{ matrix.archive-dir }}/Paw-${{ env.APP_VERSION }}-${{ matrix.target }}.zip"
+          DMG_STAGE="/tmp/paw-dmg"
+          rm -rf "$DMG_STAGE" && mkdir -p "$DMG_STAGE"
+          cp -R /tmp/paw-pack/Paw-darwin-arm64/Paw.app "$DMG_STAGE/"
+          ln -s /Applications "$DMG_STAGE/Applications"
+          hdiutil create -volname "Paw" -srcfolder "$DMG_STAGE" -ov -format UDZO \
+            "${{ matrix.archive-dir }}/Paw-${{ env.APP_VERSION }}-${{ matrix.target }}${{ matrix.ext }}"
         env:
           PAW_NO_INSTALL: '1'
 
-      - name: 打包并压缩（Windows）
+      - name: 打包并生成安装包（Windows）
         if: runner.os == 'Windows'
         shell: pwsh
         run: |
           ${{ matrix.script }}
-          Compress-Archive -Path pack/Paw-win32-x64 -DestinationPath "${{ matrix.archive-dir }}/Paw-${{ env.APP_VERSION }}-${{ matrix.target }}.zip" -Force
+          $iscc = (Get-Command iscc -ErrorAction SilentlyContinue)?.Source
+          if (-not $iscc -and (Test-Path "C:\Program Files (x86)\Inno Setup 6\ISCC.exe")) {
+            $iscc = "C:\Program Files (x86)\Inno Setup 6\ISCC.exe"
+          }
+          if (-not $iscc) {
+            choco install innosetup -y --no-progress
+            $iscc = "C:\Program Files (x86)\Inno Setup 6\ISCC.exe"
+          }
+          $ver = "${{ steps.ver.outputs.version }}"
+          $outBase = "Paw-${{ env.APP_VERSION }}-${{ matrix.target }}"
+          & $iscc `
+            "/DMyAppVersion=$ver" `
+            "/DSourceDir=$PWD\pack\Paw-win32-x64" `
+            "/DOutputDir=$PWD\pack" `
+            "/DOutputBaseFilename=$outBase" `
+            "desktop\scripts\installer.iss"
+          if ($LASTEXITCODE -ne 0) { Write-Error "✗ Inno Setup 打包失败" }
 
       - name: 上传产物
         uses: actions/upload-artifact@v4
         with:
           name: Paw-${{ env.APP_VERSION }}-${{ matrix.target }}
-          path: ${{ matrix.archive-dir }}/Paw-${{ env.APP_VERSION }}-${{ matrix.target }}.zip
+          path: ${{ matrix.archive-dir }}/Paw-${{ env.APP_VERSION }}-${{ matrix.target }}${{ matrix.ext }}
           retention-days: 14
 
   release:
@@ -126,6 +149,6 @@ jobs:
         with:
           tag_name: ${{ needs.package.outputs.tag }}
           target_commitish: ${{ github.sha }}
-          files: dist-artifacts/*.zip
+          files: dist-artifacts/*
           prerelease: ${{ contains(needs.package.outputs.tag, '-') }}
           generate_release_notes: true
