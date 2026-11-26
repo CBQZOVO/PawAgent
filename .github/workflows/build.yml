@@ -138,17 +138,33 @@ jobs:
     permissions:
       contents: write
     steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+
       - name: 下载全部产物
         uses: actions/download-artifact@v4
         with:
           path: dist-artifacts
           merge-multiple: true
 
+      - name: 生成 Release 说明
+        run: |
+          node desktop/scripts/gen-release-notes.mjs \
+            --tag "${{ needs.package.outputs.tag }}" \
+            --artifacts dist-artifacts \
+            --out release-notes.md
+
       - name: 发布 GitHub Release
         uses: softprops/action-gh-release@v2
         with:
+          name: Paw ${{ needs.package.outputs.tag }}
           tag_name: ${{ needs.package.outputs.tag }}
           target_commitish: ${{ github.sha }}
+          body_path: release-notes.md
           files: dist-artifacts/*
           prerelease: ${{ contains(needs.package.outputs.tag, '-') }}
-          generate_release_notes: true
