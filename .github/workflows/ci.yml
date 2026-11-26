@@ -1,0 +1,41 @@
+# 日常 CI 校验：推送到 main 或提交 PR 时自动跑类型检查、单元测试与前端构建，不打包也不发 Release。
+name: ci
+
+on:
+  push:
+    branches:
+      - main
+  pull_request:
+    branches:
+      - main
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: pnpm/action-setup@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: pnpm
+
+      - name: 安装依赖
+        run: pnpm install --frozen-lockfile
+
+      - name: 语法与类型检查
+        run: |
+          node --check desktop/src/main.cjs
+          pnpm typecheck
+
+      - name: 运行测试
+        run: pnpm test
+
+      - name: 前端构建验证
+        run: pnpm build
