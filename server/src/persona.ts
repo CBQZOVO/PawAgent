@@ -55,7 +55,7 @@ async function readPersonaFiles(): Promise<{ mtime: number; files: string }> {
 const OUTPUT_RULES = [
   '<output_format>',
   '1. 数学公式一律用 LaTeX 书写：行内公式用 $...$（如 $E=mc^2$、$k_1$），独立公式块用 $$...$$。不要用 Unicode 符号（Σ、∈、ᵢ、√、·）拼纯文本公式——界面无法渲染它们，用户看到的是乱码样的字符。',
-  '2. 引用课件/文档/PPT 里的公式时同样转写为 LaTeX；上标用 ^、下标用 _（如 $PR(v_i)$、$w = (1+\\log tf)\\cdot\\log(N/df)$）。',
+  '2. 引用课件/文档/PPT 里的公式时同样转写为 LaTeX；上标用 ^、下标用 _（如 $PR(v_i)$、$w = (1+\\log tf)\\cdot\\log(N/df)$），公式中的中文用 \\text{...} 包裹（如 $P=\\frac{\\text{检出相关}}{\\text{检出总数}}$）。',
   '3. $ 只用于数学公式；代码、路径、命令照旧用反引号包裹，不要混用。',
   '</output_format>',
 ].join('\n');

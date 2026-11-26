@@ -27,7 +27,7 @@ const render = (md: string) => String(unified()
   .use(remarkMath)
   .use(remarkMathGuard)
   .use(remarkRehype)
-  .use(rehypeKatex)
+  .use(rehypeKatex, { strict: false })
   .use(rehypeStringify)
   .processSync(normalizeLatexDelimiters(md)));
 
@@ -64,8 +64,12 @@ test('带空格但含数学符号的仍是公式', () => {
   assert.equal((html.match(/class="katex"/g) || []).length, 3);
 });
 
-test('公式里的中文必须包在 \\text{} 里', () => {
+test('公式里的中文：\\text{} 与含明确 LaTeX 命令（如 \\frac{中文}{中文}）均可渲染，裸中文仍拦截', () => {
   assert.ok(looksLikeMath('\\text{收入}_{i,t}'), 'text 命令里的中文算公式');
+  assert.ok(looksLikeMath('P=\\frac{检出相关}{检出总数}'), '含明确 LaTeX 命令的中文公式应放行');
+  const html = render('查准率 $P=\\frac{检出相关}{检出总数}$、查全率 $R=\\frac{检出相关}{实际相关总数}$');
+  assert.equal((html.match(/class="katex"/g) || []).length, 2, '两个含中文分数的行内公式应正常渲染');
+  assert.ok(!html.includes('katex-error'), '不应有 KaTeX 渲染错误');
   assert.ok(!looksLikeMath('100 到'), '裸中文不算公式');
   assert.ok(!looksLikeMath('x 和 '), '结尾空格 + 中文不算公式');
   assert.ok(!looksLikeMath('5 and'), '含空格且没有数学符号不算公式');

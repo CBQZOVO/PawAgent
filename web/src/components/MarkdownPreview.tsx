@@ -10,7 +10,7 @@ import 'katex/dist/katex.min.css';
 
 const REMARK_PLUGINS = [remarkGfm, remarkMath, remarkMathGuard];
 // 顺序要紧：先 raw 把 HTML 变成真实节点，再 sanitize 过滤危险标签，最后由 KaTeX 渲染公式节点
-const REHYPE_PLUGINS: any[] = [rehypeRaw, [rehypeSanitize, mdSchema], rehypeKatex];
+const REHYPE_PLUGINS: any[] = [rehypeRaw, [rehypeSanitize, mdSchema], [rehypeKatex, { strict: false }]];
 
 /**
  * Markdown 预览（GitHub 风格排版 + LaTeX 公式）。

@@ -6,7 +6,8 @@ import { normalizeLatexDelimiters, remarkMathGuard } from '../lib/markdown-math'
 import 'katex/dist/katex.min.css';
 
 const REMARK_PLUGINS = [remarkGfm, remarkMath, remarkMathGuard];
-const REHYPE_PLUGINS = [rehypeKatex];
+// strict: false 允许公式里直接出现中文（如 \frac{检出相关}{检出总数}）而不刷控制台警告
+const REHYPE_PLUGINS: any[] = [[rehypeKatex, { strict: false }]];
 
 /**
  * 聊天消息的 Markdown 渲染（GFM 表格/任务列表 + LaTeX 公式）。

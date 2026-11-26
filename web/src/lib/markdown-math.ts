@@ -7,7 +7,8 @@
  *
  * 判定一条行内 $...$ 是公式，要同时满足：
  *   1. 首尾没有空白（"$x $"、"100 到 " 这类不是）；
- *   2. \text{} 等文本命令之外不含中文等 CJK 字符（中文进公式必须包在 \text{} 里）；
+ *   2. \text{} 等文本命令之外含中文等 CJK 字符时，必须包含明确的 LaTeX 命令（如 \frac、\sum），
+ *      否则视为普通文本误切（如「$100 到 $200」）；
  *   3. 内容含空格时，必须至少有一个数学符号（= ^ _ \ { } + - < > 括号等）。
  *      "E = mc^2"、"a + b" 是公式；"5 and" 不是。
  * 独立公式块 $$...$$ 不做判定（分隔符明确，基本不会误伤）。
@@ -18,6 +19,7 @@ type MdNode = { type: string; value?: string; children?: MdNode[] };
 
 const CJK_RE = /[\u3040-\u30FF\u3400-\u4DBF\u4E00-\u9FFF\uAC00-\uD7AF\uF900-\uFAFF]/;
 const TEXT_CMD_RE = /\\(text|textrm|textbf|textit|mathrm|mathbf|mathit|mathsf|mathtt|mbox|operatorname)\{[^{}]*\}/g;
+const LATEX_CMD_RE = /\\[a-zA-Z]{2,}/;
 const MATH_SYMBOL_RE = /[\\^_{}=+\-<>()[\]|]|≤|≥|×|·|≠|≈|∈|∑|∫|√|∞|±|→/;
 // 金额区间（$100-$200、$5~$10、$100/$200）被 remark-math 切出的前段如 "100-" / "5~" / "100/"
 const DANGLING_PRICE_RE = /^\d[\d,.]*[-~–—/,，、]$/;
@@ -25,7 +27,7 @@ const DANGLING_PRICE_RE = /^\d[\d,.]*[-~–—/,，、]$/;
 export function looksLikeMath(src: string): boolean {
   if (!src || src !== src.trim()) return false;
   if (DANGLING_PRICE_RE.test(src)) return false;
-  if (CJK_RE.test(src.replace(TEXT_CMD_RE, ''))) return false;
+  if (CJK_RE.test(src.replace(TEXT_CMD_RE, '')) && !LATEX_CMD_RE.test(src)) return false;
   if (/\s/.test(src) && !MATH_SYMBOL_RE.test(src)) return false;
   return true;
 }
