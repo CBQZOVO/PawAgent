@@ -1,7 +1,7 @@
 // 调度规则 + 消息组装的纯函数测试（零依赖，tsx 直跑）
 // 运行：pnpm --filter @paw/server test
 import assert from 'node:assert/strict';
-import { assistantFinalText, assistantHistoryMessages, assistantHistoryText, toolStepSummary, type ScheduledTask } from '@paw/shared';
+import { assistantFinalText, assistantHistoryMessages, assistantHistoryText, toolStepSummary, type ChatMessage, type ScheduledTask } from '@paw/shared';
 import { cronMatches, biweeklyDue } from '../src/scheduler.js';
 import { composeChatMessages } from '../src/chat-input.js';
 import { normalizeQuestions } from '../src/tools/ask-user.js';
@@ -114,6 +114,85 @@ test('不能读图的模型：识别文字追加进正文，图片不再走 imag
   });
   assert.deepEqual(r.imageUrls, []);
   assert.ok(r.messages[r.messages.length - 1].content.includes('一只猫'));
+});
+
+test('图片落盘后：@ 引用直接用真实路径，编号与 image part 顺序严格一致', () => {
+  const img = (name: string, data: string, localPath: string) => ({
+    name, content: `data:image/png;base64,${data}`, size: 1, mime: 'image/png', kind: 'image' as const, localPath,
+  });
+  // 正文里 b 先被引用 → b 是第 1 张图；不能按附件数组顺序编号
+  const r = composeChatMessages({
+    messages: [{ role: 'user', content: '先看 @"b.png" 再看 @"a.png"' }],
+    skillBlocks: [],
+    attachments: [img('a.png', 'AAA', '/store/xxx-a.png'), img('b.png', 'BBB', '/store/xxx-b.png')],
+    canSeeImages: true,
+  });
+  const content = r.messages[r.messages.length - 1].content;
+  assert.deepEqual(r.imageUrls, ['data:image/png;base64,BBB', 'data:image/png;base64,AAA'], 'image part 按正文出现顺序');
+  assert.ok(content.includes('先看 @image#1:/store/xxx-b.png 再看 @image#2:/store/xxx-a.png'), '引用原位替换成真实路径，编号跟 image part 对上');
+  assert.ok(!content.includes('base64'), 'base64 不应拼进文本');
+});
+
+test('文件附件落盘后：@ 引用同样用真实路径，元信息块保留', () => {
+  const r = composeChatMessages({
+    messages: base,
+    skillBlocks: [],
+    attachments: [{ name: '日志.gz', content: '[二进制文件：日志.gz]', size: 100, mime: 'application/gzip', kind: 'file', localPath: '/store/xxx-日志.gz' }],
+    canSeeImages: true,
+  });
+  const content = r.messages[r.messages.length - 1].content;
+  assert.ok(content.includes('@"/store/xxx-日志.gz"'), '引用是本机真实路径');
+  assert.ok(content.includes('local_path="/store/xxx-日志.gz"'), '元信息块里的路径一致');
+});
+
+test('历史消息里的 @ 占位改写成落盘真实路径（最后一条 user 消息除外）', () => {
+  const history: ChatMessage[] = [
+    { role: 'user', content: '看这张 @"截图1.png" 和 @image:分组.png' },
+    { role: 'assistant', content: '好的' },
+    { role: 'user', content: '这次是 @"新建.txt"' },
+  ];
+  const r = composeChatMessages({
+    messages: history,
+    skillBlocks: [],
+    attachments: [{ name: '新建.txt', content: '内容', size: 2, mime: 'text/plain', kind: 'file' }],
+    persistedPaths: { '截图1': '/store/aa-截图1.png', '分组': '/store/bb-分组.png', '新建': '/store/cc-新建.txt' },
+    canSeeImages: true,
+  });
+  assert.ok(!r.messages[0].content.includes('@image:'), '@image: 占位应被改写');
+  assert.ok(!r.messages[0].content.includes('@"截图1.png"'), '原文件名占位应被改写');
+  assert.ok(r.messages[0].content.includes('@"/store/aa-截图1.png"'), '文件名引用 → 真实路径');
+  assert.ok(r.messages[0].content.includes('@"/store/bb-分组.png"'), '@image: 引用 → 真实路径');
+  // 最后一条 user 没有落盘路径（附件没传 localPath），占位保持原样
+  assert.ok(r.messages[2].content.includes('@"新建.txt"'), '最后一条 user 走本轮附件逻辑');
+});
+
+test('历史里多张同名附件（image.png）按出现顺序一一对应各自落盘路径', () => {
+  const history: ChatMessage[] = [
+    { role: 'user', content: '第一张 @"image.png"' },
+    { role: 'assistant', content: '收到1' },
+    { role: 'user', content: '第二张 @"image.png"' },
+    { role: 'assistant', content: '收到2' },
+    { role: 'user', content: '对比一下' },
+  ];
+  const r = composeChatMessages({
+    messages: history,
+    skillBlocks: [],
+    attachments: [],
+    persistedPaths: { image: ['/store/111-image.png', '/store/222-image.png'] },
+    canSeeImages: true,
+  });
+  assert.ok(r.messages[0].content.includes('@"/store/111-image.png"'), '第 1 轮指向第 1 张图');
+  assert.ok(r.messages[2].content.includes('@"/store/222-image.png"'), '第 2 轮指向第 2 张图');
+});
+
+test('图片没有落盘路径时：引用保留原文件名（行为与之前一致）', () => {
+  const r = composeChatMessages({
+    messages: base,
+    skillBlocks: [],
+    attachments: [{ name: 'a.png', content: 'data:image/png;base64,XYZ', size: 3, mime: 'image/png', kind: 'image' }],
+    canSeeImages: true,
+  });
+  assert.ok(r.messages[r.messages.length - 1].content.includes('@image#1:a.png'));
 });
 
 test('技能 + 图片 + 文件三件套：顺序追加，互不覆盖', () => {

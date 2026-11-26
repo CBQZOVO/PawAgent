@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState } from 'react';
 import type { RefObject } from 'react';
-import { ArrowRightLeft, ArrowUp, Check, ChevronDown, Link2, Paperclip, Sparkles, Square, X } from 'lucide-react';
+import { ArrowRightLeft, ArrowUp, Check, ChevronDown, CornerDownRight, FileText, Image as ImageIcon, Link2, Paperclip, Pencil, Sparkles, Square, Trash2, X } from 'lucide-react';
 import type { Attachment, ContextReading, HandoffContext, ViewMessage } from '@paw/shared';
 import { getSkills, type ModelInfo } from '../api/client';
 import ModelMenu from './ModelMenu';
@@ -10,11 +10,23 @@ import ContextMeter from './composer/ContextMeter';
 
 interface SkillItem { id: string; name: string; description: string }
 
-/** 输入区：textarea + 附件/技能 chip + 上传/技能/模型/发送 */
+export interface QueuedMessage {
+  id: string;
+  text: string;
+  attachments: Attachment[];
+  skillIds: string[];
+  connectionCode?: string;
+  handoff?: HandoffContext;
+  model: string;
+  createdAt: number;
+}
+
+/** 输入区：队列卡片 + textarea + 附件/技能 chip + 上传/技能/模型/发送 */
 export default function Composer({
   input, attachments, readingFiles, busy, compacting, model, models, modelMenu, modelSearch, modelsRefreshing,
   contextSessionId, contextTurn, contextMessages, contextReading, selectedSkills, selectedConnection, onSelectConnection, focusRef,
   handoffDraft, onUpdateHandoffDraft, onClearHandoffDraft, onOpenHandoffSource, onCompact, onHandoff,
+  queuedMessages = [], onSteerQueued, onEditQueued, onDeleteQueued,
   onInput, onAddFiles, onRemoveFile, onSkillPaste, onRestoreAttachment,
   onToggleSkill, onClearSkills,
   onToggleModel, onCloseModel, onModelSearch, onSelectModel, onSend, onStop,
@@ -46,6 +58,10 @@ export default function Composer({
   onOpenHandoffSource?: (sessionId: string) => void;
   onCompact?: () => void;
   onHandoff?: () => void;
+  queuedMessages?: QueuedMessage[];
+  onSteerQueued?: (id: string) => void;
+  onEditQueued?: (id: string) => void;
+  onDeleteQueued?: (id: string) => void;
   onInput: (v: string) => void;
   onAddFiles: (files: FileList | null) => void;
   onRemoveFile: (i: number) => void;
@@ -108,9 +124,76 @@ export default function Composer({
   // Electron 直接把窗口导航到那个文件（看起来就是「自动打开了」）。
   const [dragging, setDragging] = useState(false);
   const [handoffOpen, setHandoffOpen] = useState(false);
+  const [queueOpen, setQueueOpen] = useState(true);
+  const canSend = !compacting && !readingFiles && !!(input.trim() || attachments.length || handoffDraft);
 
   return (
     <div className="composer-wrap">
+      {queuedMessages.length > 0 && (
+        <div className="queue-card">
+          <button type="button" className="queue-head" onClick={() => setQueueOpen((v) => !v)}>
+            <ChevronDown size={13} className={queueOpen ? '' : 'collapsed'} />
+            <span>队列 ({queuedMessages.length})</span>
+            <span className="queue-hint">{busy ? '本轮完成后按顺序发送，点 ↑ 可强行提醒模型' : '等待发送'}</span>
+          </button>
+          {queueOpen && (
+            <div className="queue-list">
+              {queuedMessages.map((item) => (
+                <div className="queue-item" key={item.id}>
+                  <CornerDownRight size={13} className="queue-item-icon" />
+                  <div className="queue-item-body">
+                    {item.text && <span className="queue-item-text">{item.text}</span>}
+                    {item.attachments.map((a, idx) => (
+                      <span className="queue-chip" key={`${item.id}-a-${idx}`}>
+                        {a.kind === 'image' ? <ImageIcon size={11} /> : <FileText size={11} />}
+                        {a.name}
+                      </span>
+                    ))}
+                    {item.skillIds.map((s) => (
+                      <span className="queue-chip skill" key={`${item.id}-s-${s}`}>
+                        <Sparkles size={11} />
+                        {s}
+                      </span>
+                    ))}
+                  </div>
+                  <div className="queue-item-actions">
+                    {onSteerQueued && (
+                      <button
+                        type="button"
+                        className="queue-act-btn steer"
+                        title={busy ? '强行提醒模型（立即插入当前轮次）' : '立即发送'}
+                        onClick={() => onSteerQueued(item.id)}
+                      >
+                        <ArrowUp size={13} />
+                      </button>
+                    )}
+                    {onEditQueued && (
+                      <button
+                        type="button"
+                        className="queue-act-btn"
+                        title="回到对话框编辑（编辑完排到队尾）"
+                        onClick={() => onEditQueued(item.id)}
+                      >
+                        <Pencil size={13} />
+                      </button>
+                    )}
+                    {onDeleteQueued && (
+                      <button
+                        type="button"
+                        className="queue-act-btn danger"
+                        title="从队列中删除"
+                        onClick={() => onDeleteQueued(item.id)}
+                      >
+                        <Trash2 size={13} />
+                      </button>
+                    )}
+                  </div>
+                </div>
+              ))}
+            </div>
+          )}
+        </div>
+      )}
       {handoffDraft && (
         <div className={'handoff-draft-card' + (handoffOpen ? ' open' : '')}>
           <div className="handoff-draft-head">
@@ -184,9 +267,15 @@ export default function Composer({
             setDragging(false);
             onAddFiles(files);
           }}
-          placeholder={isImageModel ? '描述你想画的图…  Enter 生成（可附图片做图生图）' : '给 Paw 发消息…  Enter 发送，Shift+Enter 换行'}
+          placeholder={
+            busy
+              ? '会话进行中，输入内容将排队发送…  Enter 加入队列，Shift+Enter 换行'
+              : isImageModel
+                ? '描述你想画的图…  Enter 生成（可附图片做图生图）'
+                : '给 Paw 发消息…  Enter 发送，Shift+Enter 换行'
+          }
           compactCompletion={!readingFiles && !attachments.length}
-          disabled={busy || compacting}
+          disabled={compacting}
           focusRef={focusRef}
         />
         {/* 技能 chips 仍在框内上方（它不是正文的一部分，只是本条消息的开关） */}
@@ -203,7 +292,7 @@ export default function Composer({
         <div className="composer-bar">
           <input ref={fileRef} type="file" multiple hidden
             onChange={(e) => { onAddFiles(e.target.files); e.target.value = ''; focusRef.current?.focus(); }} />
-          <button type="button" className="attach-btn" disabled={busy} onClick={() => fileRef.current?.click()} title="上传文件">
+          <button type="button" className="attach-btn" disabled={compacting} onClick={() => fileRef.current?.click()} title="上传文件">
             <Paperclip size={15} />
           </button>
           {/* 技能选择按钮 + 下拉 */}
@@ -273,11 +362,18 @@ export default function Composer({
               onToggle={onToggleModel} onClose={onCloseModel} onSearch={onModelSearch} onSelect={onSelectModel}
             />
             {busy ? (
-              <button className="send-btn stop" onClick={onStop} title="停止">
-                <Square size={13} fill="currentColor" />
-              </button>
+              <>
+                {canSend && (
+                  <button className="send-btn enqueue" onClick={() => onSend(input)} title="加入待发送队列 (Enter)">
+                    <ArrowUp size={15} />
+                  </button>
+                )}
+                <button className="send-btn stop" onClick={onStop} title="停止">
+                  <Square size={13} fill="currentColor" />
+                </button>
+              </>
             ) : (
-              <button className="send-btn" onClick={() => onSend(input)} disabled={compacting || readingFiles || (!input.trim() && !attachments.length && !handoffDraft)} title={readingFiles ? '正在读取附件…' : '发送'}>
+              <button className="send-btn" onClick={() => onSend(input)} disabled={!canSend} title={readingFiles ? '正在读取附件…' : '发送'}>
                 <ArrowUp size={16} />
               </button>
             )}

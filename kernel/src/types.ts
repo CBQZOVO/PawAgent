@@ -73,7 +73,8 @@ export type AgentEvent =
   | { type: 'subagent_done'; id: string; status: SubagentStatus; summary: string;
       seconds: number; rounds: number; tokens?: { prompt: number; completion: number } }
   | { type: 'open_browser'; url: string; key?: string; partition?: string; title?: string }
-  | { type: 'ask'; questions: AskQuestion[] };
+  | { type: 'ask'; questions: AskQuestion[] }
+  | { type: 'steer_unconsumed'; ids: string[] };
 
 export interface StreamDelta {
   reasoning?: string;

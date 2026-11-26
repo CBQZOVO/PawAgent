@@ -41,6 +41,12 @@ export function useAttachments(onError: (msg: string) => void) {
     addFiles,
     /** 直接追加已构造好的引用（右键「添加到 Paw 对话」：文件 / 文件夹 / 代码片段） */
     addRefs: (refs: Attachment[]) => setAttachments((prev) => addAttachments(prev, refs)),
+    /** 用指定附件列表替换当前附件（从队列点「编辑」回填输入框用） */
+    setFiles: (atts: Attachment[]) => {
+      generation.current++;
+      setPending(0);
+      setAttachments([...atts]);
+    },
     removeFile: (i: number) => setAttachments((prev) => removeAttachment(prev, i)),
     clearFiles: () => {
       generation.current++;

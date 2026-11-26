@@ -18,7 +18,7 @@ export const mdSchema = {
     img: [...(defaultSchema.attributes?.img || []), 'width', 'height', 'loading', 'align'],
     a: [...(defaultSchema.attributes?.a || []), 'target', 'rel'],
     source: [...(defaultSchema.attributes?.source || []), 'src', 'type', 'media'],
-    code: [...(defaultSchema.attributes?.code || []), ['className', /^language-./]],
+    code: [...(defaultSchema.attributes?.code || []), ['className', /^language-./, 'math-inline', 'math-display']],
     span: [...(defaultSchema.attributes?.span || []), 'className'],
   },
 };

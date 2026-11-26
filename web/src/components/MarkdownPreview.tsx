@@ -1,16 +1,25 @@
 import ReactMarkdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
+import remarkMath from 'remark-math';
 import rehypeRaw from 'rehype-raw';
 import rehypeSanitize from 'rehype-sanitize';
+import rehypeKatex from 'rehype-katex';
 import { mdSchema, resolveWorkspaceSrc } from '../lib/markdown-schema';
+import { normalizeLatexDelimiters, remarkMathGuard } from '../lib/markdown-math';
+import 'katex/dist/katex.min.css';
+
+const REMARK_PLUGINS = [remarkGfm, remarkMath, remarkMathGuard];
+// 顺序要紧：先 raw 把 HTML 变成真实节点，再 sanitize 过滤危险标签，最后由 KaTeX 渲染公式节点
+const REHYPE_PLUGINS: any[] = [rehypeRaw, [rehypeSanitize, mdSchema], rehypeKatex];
 
 /**
- * Markdown 预览（GitHub 风格排版）。
+ * Markdown 预览（GitHub 风格排版 + LaTeX 公式）。
  *
  * 原始 HTML 必须解析：GitHub README 里 `<div align="center">` 包横幅、
  * `<img width="24px">` 排图标表、`<br>` 换行都是常规写法。
  * react-markdown 默认丢掉这些标签、把它们当纯文本吐出来 —— 所以加 rehype-raw，
- * 紧跟 rehype-sanitize 按 GitHub 白名单过滤（见 lib/markdown-schema）。
+ * 紧跟 rehype-sanitize 按 GitHub 白名单过滤（见 lib/markdown-schema），
+ * 最后由 rehype-katex 渲染经白名单放行的 math-inline / math-display 节点。
  */
 export default function MarkdownPreview({ content, root, filePath }: {
   content: string;
@@ -20,9 +29,8 @@ export default function MarkdownPreview({ content, root, filePath }: {
   return (
     <div className="md-preview">
       <ReactMarkdown
-        remarkPlugins={[remarkGfm]}
-        // 顺序要紧：先 raw 把 HTML 变成真实节点，再 sanitize 过滤
-        rehypePlugins={[rehypeRaw, [rehypeSanitize, mdSchema]]}
+        remarkPlugins={REMARK_PLUGINS}
+        rehypePlugins={REHYPE_PLUGINS}
         components={{
           a: ({ href, children, ...rest }) => {
             const external = !!href && /^(https?:|mailto:)/i.test(href);
@@ -36,7 +44,7 @@ export default function MarkdownPreview({ content, root, filePath }: {
           ),
         }}
       >
-        {content}
+        {normalizeLatexDelimiters(content)}
       </ReactMarkdown>
     </div>
   );

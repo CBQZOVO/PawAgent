@@ -84,6 +84,8 @@ export interface RunAgentParams {
   rawHistory?: ChatMessage[];
   unattended?: boolean;
   outputSchema?: Record<string, unknown>;
+  /** 运行中拉取用户强行提醒（插话）消息队列；每次调用清空并返回待注入内容 */
+  drainSteering?: () => string[];
 }
 
 export async function* runAgent(params: RunAgentParams): AsyncGenerator<AgentEvent> {
@@ -106,6 +108,7 @@ export async function* runAgent(params: RunAgentParams): AsyncGenerator<AgentEve
     unattended,
     outputSchema,
     windowTokens,
+    drainSteering,
   } = params;
   const maxRounds = params.maxRounds || DEFAULT_MAX_ROUNDS;
   const maxParallelCalls = params.maxParallelCalls || DEFAULT_MAX_PARALLEL_CALLS;
@@ -157,7 +160,9 @@ export async function* runAgent(params: RunAgentParams): AsyncGenerator<AgentEve
     let answerText = '';
     let finish = '';
 
-    const roundImages = round === 0 ? images : undefined;
+    // 图片每一轮都带：以前只在第 0 轮发，模型一调工具，下一轮图片就从上下文里消失，
+    // 「先跑工具、再回头对着截图分析」必然扑空（2026-11-26 两条排查会话实锤）。
+    const roundImages = images;
     const budgetOptions = { images: roundImages, signal, windowTokens };
     const plan = round === 0 && store && sessionId && rawHistory && isConversationHistory(rawHistory)
       ? await prepareSessionContext(streamChat, store, sessionId, rawHistory, input, pinned, toolSchemas, budgetOptions)
@@ -249,6 +254,19 @@ export async function* runAgent(params: RunAgentParams): AsyncGenerator<AgentEve
         continue;
       }
       messages.push({ role: 'assistant', content: answerText, reasoning_content: reasoningText || undefined });
+      // 本轮准备收尾前再检查一次：若用户在生成期间点了「强行提醒」，立刻注入并续跑一轮
+      const endSteers = round < maxRounds - 1 ? drainSteering?.() : undefined;
+      if (endSteers?.length) {
+        const combined = endSteers.join('\n\n');
+        const sid = `steer-${randomUUID().slice(0, 8)}`;
+        yield { type: 'tool_start', id: sid, name: 'user_steer', summary: `强行提醒：${combined.slice(0, 48)}` };
+        yield { type: 'tool_done', id: sid, name: 'user_steer', ok: true, output: combined };
+        messages.push({
+          role: 'user',
+          content: `<system-reminder>\n用户在你执行过程中发来了强行提醒（插话），请立刻优先响应：\n${combined}\n</system-reminder>`,
+        });
+        continue;
+      }
       yield { type: 'done', usage: usageTotal.prompt || usageTotal.completion ? usageTotal : undefined };
       return;
     }
@@ -436,6 +454,14 @@ export async function* runAgent(params: RunAgentParams): AsyncGenerator<AgentEve
     }
     if (round === maxRounds - 3) {
       reminders.push('⚠️ 工具轮次预算只剩 2 轮：停止继续探索，立刻基于已有发现给出结论；没查清的地方直接说明缺口。');
+    }
+    const midSteers = drainSteering?.();
+    if (midSteers?.length) {
+      const combined = midSteers.join('\n\n');
+      const sid = `steer-${randomUUID().slice(0, 8)}`;
+      yield { type: 'tool_start', id: sid, name: 'user_steer', summary: `强行提醒：${combined.slice(0, 48)}` };
+      yield { type: 'tool_done', id: sid, name: 'user_steer', ok: true, output: combined };
+      reminders.push(`用户在你执行过程中发来了强行提醒（插话），请立刻优先响应并在接下来的行动中遵循：\n${combined}`);
     }
     if (reminders.length) {
       const lastMsg = messages[messages.length - 1];

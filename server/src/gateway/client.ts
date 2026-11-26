@@ -95,6 +95,10 @@ export async function* streamChat(
   images?: string[],   // 本轮上传图片的 data URL（OpenAI 多模态 image_url part）
   signal?: AbortSignal, // 客户端停止时中断上游模型请求
 ): AsyncGenerator<StreamDelta> {
+  // 本轮图片挂到**最后一条 user 消息**上。
+  // 不能只认「数组最后一条」：模型调过工具之后，数组末尾是 tool 消息，user 消息在中间——
+  // 按末尾判断，图片就会从第 1 轮起整体丢失。
+  const lastUser = messages.map((m) => m.role).lastIndexOf('user');
   // 回传历史里的 tool_calls 必须是 OpenAI 嵌套格式
   // {id,type:function,function:{name,arguments}}；shared 内部用平铺，发送前转换。
   const wireMessages = messages.map((m, i) => {
@@ -108,9 +112,9 @@ export async function* streamChat(
         })),
       };
     }
-    // 本轮图片：最后一条 user 消息的 content 转成多模态数组
-    // 照 WorkBuddy 实测格式：{type:"image_url", image_url:{url:"data:image/...;base64,..."}}
-    if (images?.length && m.role === 'user' && i === messages.length - 1) {
+    // content 转成多模态数组，照 WorkBuddy 实测格式：
+    // {type:"image_url", image_url:{url:"data:image/...;base64,..."}}
+    if (images?.length && m.role === 'user' && i === lastUser) {
       return {
         ...m,
         content: [

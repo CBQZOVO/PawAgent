@@ -160,6 +160,20 @@ export async function* streamChat(
   }
 }
 
+/** 运行中强行提醒模型（插话注入当前正在执行的轮次）；若会话已结束返回 injected=false */
+export async function steerChat(
+  sessionId: string,
+  payload: { id?: string; text: string; attachments?: Attachment[]; skillIds?: string[] },
+): Promise<{ ok: boolean; injected: boolean }> {
+  const r = await fetch('/api/chat/steer', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ sessionId, ...payload }),
+  });
+  if (!r.ok) return { ok: false, injected: false };
+  return r.json() as Promise<{ ok: boolean; injected: boolean }>;
+}
+
 /** 会话标题：第二次模型调用。失败返回空串，调用方保留字符串兜底标题。 */
 export async function generateTitleApi(text: string, model?: string): Promise<string> {
   try {

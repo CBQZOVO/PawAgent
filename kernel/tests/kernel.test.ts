@@ -105,4 +105,33 @@ const rtRes = await rt.execute('demo_write', {}, 'id-1', { depth: 0, emit: () =>
 assert.equal(rtRes.content, 'written');
 assert.equal(rtRes.isError, false);
 
+// drainSteering：本轮即将收尾时若有用户强行提醒，注入并续跑一轮
+{
+  let turn = 0;
+  let sawSteerInPrompt = false;
+  const steers = ['改用中文简洁回答'];
+  const steerEvents: string[] = [];
+  const steerStream: StreamChatFn = async function* ({ messages }) {
+    turn++;
+    if (turn === 1) {
+      yield { content: 'first draft' };
+      return;
+    }
+    sawSteerInPrompt = messages.some((m) => typeof m.content === 'string' && m.content.includes('改用中文简洁回答'));
+    yield { content: '已按提醒调整' };
+  };
+  for await (const ev of runAgent({
+    streamChat: steerStream,
+    model: 'demo-model',
+    tools: { getSchemas: () => [], execute: async () => ({ tool_call_id: '', content: '' }) },
+    input: [{ role: 'user', content: 'hi' }],
+    drainSteering: () => steers.splice(0),
+  })) {
+    if (ev.type === 'tool_start') steerEvents.push(ev.name);
+  }
+  assert.equal(turn, 2, '强行提醒应触发续跑第 2 轮');
+  assert.equal(sawSteerInPrompt, true, '第 2 轮消息应包含强行提醒内容');
+  assert.deepEqual(steerEvents, ['user_steer']);
+}
+
 console.log('✓ @paw/kernel standalone tests passed');

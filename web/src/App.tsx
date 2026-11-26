@@ -2,7 +2,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { ArrowDown, ArrowLeft, ArrowRight, ArrowRightLeft, ChevronUp, Eye, Globe, Maximize2, Minimize2, PanelLeftClose, PanelLeftOpen, Sparkles } from 'lucide-react';
 import { messageText, type AgentEvent, type Attachment, type ContextReading, type HandoffContext, type ScheduledTask, type ViewMessage } from '@paw/shared';
 import {
-  compactContext, createHandoff, generateTitleApi, getModels, getPlugins, getSearchConfig, getSession, getWorkspace, notifyTurnEnd, removeWorkspace as removeWorkspaceApi, rewindFiles, setSearchConfig, setWorkspace, streamChat,
+  compactContext, createHandoff, generateTitleApi, getModels, getPlugins, getSearchConfig, getSession, getWorkspace, notifyTurnEnd, removeWorkspace as removeWorkspaceApi, rewindFiles, setSearchConfig, setWorkspace, steerChat, streamChat,
   PLUGINS_CHANGED, WORKSPACE_CHANGED, type ModelInfo, type PluginPageInfo, type SearchProvider,
 } from './api/client';
 import { clearAttachments } from './lib/attachments';
@@ -10,7 +10,7 @@ import { extractSkillRefs } from './lib/skill-refs';
 import { toChatMessages } from './lib/store';
 import { useAttachments } from './hooks/useAttachments';
 import { useSessions } from './hooks/useSessions';
-import Composer from './components/Composer';
+import Composer, { type QueuedMessage } from './components/Composer';
 import MessageRow from './components/MessageRow';
 import Sidebar from './components/Sidebar';
 import TaskPanel from './components/TaskPanel';
@@ -77,6 +77,14 @@ export default function App() {
   const titleCancelRef = useRef(false);
   // 「生成中」绑定到会话：切走会话后，旧会话的运行状态不会错画到当前会话上
   const [runningIds, setRunningIds] = useState<Set<string>>(new Set());
+  // 按会话隔离的待发送消息队列（会话进行中发消息自动排队，本轮完成后自动出队）
+  const [queues, setQueues] = useState<Map<string, QueuedMessage[]>>(new Map());
+  const queuesRef = useRef<Map<string, QueuedMessage[]>>(queues);
+  queuesRef.current = queues;
+  const manualStopRef = useRef<Set<string>>(new Set());
+  const autoDrainIdsRef = useRef<Set<string>>(new Set());
+  // 已发往 /api/chat/steer 但尚未被内核确认消费的插话；若本轮提前结束未消费则自动回滚回队首
+  const inFlightSteersRef = useRef<Map<string, { sid: string; item: QueuedMessage }>>(new Map());
   /** 空串 = 还没拿到可用模型列表。别硬编码模型名：没权限时按钮还挂着它，误导用户 */
   const [model, setModel] = useState('');
   const [models, setModels] = useState<ModelInfo[]>([]);
@@ -259,7 +267,7 @@ export default function App() {
   const [selectedSkills, setSelectedSkills] = useState<string[]>([]);
   /** 这条消息指定用哪个系统连接（code）；null=不指定 */
   const [selectedConnection, setSelectedConnection] = useState<string | null>(null);
-  const { attachments, readingFiles, addFiles, addRefs, removeFile, clearFiles } = useAttachments(setError);
+  const { attachments, readingFiles, addFiles, addRefs, setFiles, removeFile, clearFiles } = useAttachments(setError);
   const active = sessions.find((s) => s.id === activeId) || null;
   // 切会话：清掉上一个会话里点开的附件预览请求
   useEffect(() => { setPreviewRequest(null); }, [activeId]);
@@ -559,6 +567,29 @@ export default function App() {
           if (!ctrl.signal.aborted && !document.hasFocus()) void notifyTurnEnd(ev.type).catch(() => {});
         }
         if (ev.type === 'error') sawError = true;
+        if (ev.type === 'tool_start' && ev.name === 'user_steer' && targetId) {
+          for (const [sidKey, entry] of inFlightSteersRef.current) {
+            if (entry.sid === targetId) inFlightSteersRef.current.delete(sidKey);
+          }
+        }
+        if (ev.type === 'steer_unconsumed' && targetId) {
+          const restored: QueuedMessage[] = [];
+          for (const id of ev.ids) {
+            const entry = inFlightSteersRef.current.get(id);
+            if (entry && entry.sid === targetId) {
+              inFlightSteersRef.current.delete(id);
+              restored.push(entry.item);
+            }
+          }
+          if (restored.length) {
+            setQueues((prev) => {
+              const next = new Map(prev);
+              next.set(targetId!, [...restored, ...(next.get(targetId!) || [])]);
+              return next;
+            });
+          }
+          continue;
+        }
         if (ev.type === 'open_browser') {
           openBrowserUrl(ev.url, ev.key, ev.partition, ev.title);
           continue;
@@ -615,6 +646,30 @@ export default function App() {
       }
       recordDuration(targetId!, Date.now() - assistantMsg.ts, assistantMsg.id);
       if (abortMap.current.get(targetId!) === ctrl) abortMap.current.delete(targetId!);
+      // 若本轮因停止/断连提前结束，仍有未收到消费确认的强行提醒，回滚回队首，绝不静默丢失
+      let restoredSteers = 0;
+      if (targetId) {
+        const leftover: QueuedMessage[] = [];
+        for (const [id, entry] of inFlightSteersRef.current) {
+          if (entry.sid === targetId) {
+            inFlightSteersRef.current.delete(id);
+            leftover.push(entry.item);
+          }
+        }
+        if (leftover.length) {
+          restoredSteers = leftover.length;
+          setQueues((prev) => {
+            const next = new Map(prev);
+            next.set(targetId!, [...leftover, ...(next.get(targetId!) || [])]);
+            return next;
+          });
+        }
+      }
+      const wasManualStop = targetId ? manualStopRef.current.delete(targetId) : false;
+      const hasQueued = targetId ? ((queuesRef.current.get(targetId)?.length ?? 0) + restoredSteers) > 0 : false;
+      if (targetId && (sawDone || sawError) && !sawAsk && !wasManualStop && !ctrl.signal.aborted && hasQueued) {
+        autoDrainIdsRef.current.add(targetId);
+      }
       setRunningIds((prev) => { const n = new Set(prev); n.delete(targetId!); return n; });
       if (targetId) dispatchingIdsRef.current.delete(targetId);
       dispatchingIdsRef.current.delete('__creating__');
@@ -839,8 +894,36 @@ export default function App() {
     if (readingFiles || (!text && !attachments.length && !activeDraft)) return;
     const isExisting = !!activeId && sessions.some((s) => s.id === activeId);
     const lockKey = isExisting ? activeId : '__creating__';
-    if (dispatchingIdsRef.current.has(lockKey) || (isExisting && runningIds.has(activeId))) return; // 清输入框前先做同步守卫，绝不吞草稿
     if (pendingCompactions.current.has(activeId)) return;
+    const isSlashCmd = !attachments.length && (rawText === '/compact' || rawText === '/handoff' || rawText.startsWith('/handoff '));
+    // 会话正在进行中：普通消息排入队列（斜杠命令不入队，避免当普通文本发给模型）
+    if (isExisting && (runningIds.has(activeId) || dispatchingIdsRef.current.has(activeId))) {
+      if (isSlashCmd) return;
+      const item: QueuedMessage = {
+        id: uid(),
+        text,
+        attachments: attachments,
+        skillIds: skills,
+        connectionCode: selectedConnection || undefined,
+        handoff: activeDraft,
+        model,
+        createdAt: Date.now(),
+      };
+      if (activeDraft) {
+        setHandoffDrafts((prev) => { const n = new Map(prev); n.delete(activeId); return n; });
+      }
+      setQueues((prev) => {
+        const next = new Map(prev);
+        next.set(activeId, [...(next.get(activeId) || []), item]);
+        return next;
+      });
+      setInput('');
+      clearFiles();
+      setSelectedSkills([]);
+      focusRef.current?.focus();
+      return;
+    }
+    if (dispatchingIdsRef.current.has(lockKey)) return; // 仅挡住新会话创建瞬间的双击重入
     if (rawText === '/compact' && !attachments.length) {
       void compact(activeId);
       return;
@@ -863,6 +946,81 @@ export default function App() {
     void dispatch(text, model, sentAttachments, skills, activeId, undefined, undefined, undefined, selectedConnection || undefined, activeDraft);
   };
 
+  /** 队列操作：从当前会话队列中取出并删除指定项 */
+  const popQueuedItem = (sid: string, id: string): QueuedMessage | undefined => {
+    const list = queuesRef.current.get(sid);
+    const target = list?.find((x) => x.id === id);
+    if (!target) return undefined;
+    setQueues((prev) => {
+      const next = new Map(prev);
+      const rest = (next.get(sid) || []).filter((x) => x.id !== id);
+      if (rest.length) next.set(sid, rest);
+      else next.delete(sid);
+      return next;
+    });
+    return target;
+  };
+
+  /** 强行提醒模型：一律先请求服务端注入（避免前端 runningIds 闭包滞后导致并发写同一会话）；若服务端确认本轮已结束再直接发送 */
+  const steerQueued = async (id: string) => {
+    if (!activeId) return;
+    const sid = activeId;
+    const item = popQueuedItem(sid, id);
+    if (!item) return;
+    inFlightSteersRef.current.set(item.id, { sid, item });
+    const res = await steerChat(sid, {
+      id: item.id,
+      text: item.text,
+      attachments: item.attachments,
+      skillIds: item.skillIds,
+    }).catch(() => ({ ok: false, injected: false }));
+    if (res.injected) return;
+    inFlightSteersRef.current.delete(item.id);
+    // 服务端确认当前无运行中轮次：直接正常发送
+    void dispatch(item.text, item.model, item.attachments, item.skillIds, sid, undefined, undefined, undefined, item.connectionCode, item.handoff);
+  };
+
+  /** 从队列点编辑：移出队列并回填回输入框；编辑完再发送会自然排到队尾 */
+  const editQueued = (id: string) => {
+    if (!activeId) return;
+    const item = popQueuedItem(activeId, id);
+    if (!item) return;
+    setInput(item.text);
+    setFiles(item.attachments);
+    setSelectedSkills(item.skillIds);
+    setSelectedConnection(item.connectionCode ?? null);
+    if (item.handoff) {
+      setHandoffDrafts((prev) => new Map(prev).set(activeId, item.handoff!));
+    }
+    setTimeout(() => focusRef.current?.focus(), 0);
+  };
+
+  /** 从队列删除 */
+  const deleteQueued = (id: string) => {
+    if (!activeId) return;
+    popQueuedItem(activeId, id);
+  };
+
+  // 本轮结束后，自动从该会话队列取出队首第一条继续发送（在 React 提交最新 sessions 后触发，避免陈旧闭包）
+  useEffect(() => {
+    if (autoDrainIdsRef.current.size === 0) return;
+    for (const sid of [...autoDrainIdsRef.current]) {
+      if (runningIds.has(sid) || dispatchingIdsRef.current.has(sid)) continue;
+      autoDrainIdsRef.current.delete(sid);
+      const list = queuesRef.current.get(sid);
+      if (!list?.length) continue;
+      const [head, ...rest] = list;
+      setQueues((prev) => {
+        const next = new Map(prev);
+        if (rest.length) next.set(sid, rest);
+        else next.delete(sid);
+        return next;
+      });
+      void dispatch(head.text, head.model, head.attachments, head.skillIds, sid, undefined, undefined, undefined, head.connectionCode, head.handoff);
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [runningIds, queues, sessions]);
+
   /** 定时任务"立即运行"：关面板、切回聊天、开新对话执行任务（能看到 MCP 等工具调用） */
   const runTaskInChat = (task: ScheduledTask) => {
     setTaskPanel(false);
@@ -875,6 +1033,8 @@ export default function App() {
     if (!activeId) return;
     const ctrl = abortMap.current.get(activeId);
     if (!ctrl) return;
+    manualStopRef.current.add(activeId);
+    autoDrainIdsRef.current.delete(activeId);
     abortMap.current.delete(activeId);
     setRunningIds((prev) => { const n = new Set(prev); n.delete(activeId); return n; });
     markStreamStopped(activeId); // 立即解除“生成中”，不依赖流是否及时抛 AbortError
@@ -1187,6 +1347,10 @@ export default function App() {
           onCloseModel={() => setModelMenu(false)}
           onModelSearch={setModelSearch}
           onSelectModel={(id) => { setModel(id); setModelMenu(false); setModelSearch(''); }}
+          queuedMessages={activeId ? (queues.get(activeId) || []) : []}
+          onSteerQueued={(id) => void steerQueued(id)}
+          onEditQueued={editQueued}
+          onDeleteQueued={deleteQueued}
           onSend={send} onStop={stop}
         />
         </div>

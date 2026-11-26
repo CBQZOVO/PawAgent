@@ -6,11 +6,14 @@ import assert from 'node:assert/strict';
 import { unified } from 'unified';
 import remarkParse from 'remark-parse';
 import remarkGfm from 'remark-gfm';
+import remarkMath from 'remark-math';
 import remarkRehype from 'remark-rehype';
 import rehypeRaw from 'rehype-raw';
 import rehypeSanitize from 'rehype-sanitize';
+import rehypeKatex from 'rehype-katex';
 import rehypeStringify from 'rehype-stringify';
 import { mdSchema, resolveWorkspaceSrc } from '../src/lib/markdown-schema.js';
+import { normalizeLatexDelimiters, remarkMathGuard } from '../src/lib/markdown-math.js';
 
 let pass = 0;
 let total = 0;
@@ -23,11 +26,14 @@ const test = (label: string, fn: () => void) => {
 const render = (md: string) => String(unified()
   .use(remarkParse)
   .use(remarkGfm)
+  .use(remarkMath)
+  .use(remarkMathGuard)
   .use(remarkRehype, { allowDangerousHtml: true })
   .use(rehypeRaw)
   .use(rehypeSanitize, mdSchema)
+  .use(rehypeKatex)
   .use(rehypeStringify)
-  .processSync(md));
+  .processSync(normalizeLatexDelimiters(md)));
 
 test('<div align="center"> 渲染成真实元素，不是纯文本', () => {
   const html = render('<div align="center">\n<h1>B2BCommerce</h1>\n一套商城。\n</div>');
@@ -107,6 +113,14 @@ test('相对图片路径 → 工作区只读接口', () => {
 test('绝对 URL 与 data: 原样透传', () => {
   assert.equal(resolveWorkspaceSrc('https://x.com/a.png', '/ws', '/ws/a.md'), 'https://x.com/a.png');
   assert.equal(resolveWorkspaceSrc('data:image/png;base64,AAA', '/ws', '/ws/a.md'), 'data:image/png;base64,AAA');
+});
+
+test('Markdown 预览支持行内/块级 KaTeX 且不影响安全过滤', () => {
+  const html = render('<script>alert(1)</script>\n\n公式 $E = mc^2$ 与：\n\n$$\n\\sum_{i=1}^n x_i\n$$\n\n金额 $100-$200 保留');
+  assert.ok(!html.includes('<script'), 'script 仍被剥离');
+  assert.match(html, /class="katex-display"/);
+  assert.equal((html.match(/class="katex"/g) || []).length, 2);
+  assert.ok(html.includes('$100-$200'), '金额区间不被误伤');
 });
 
 console.log(`\n${pass}/${total} 通过`);

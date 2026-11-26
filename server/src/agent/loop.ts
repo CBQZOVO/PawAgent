@@ -73,6 +73,7 @@ export interface RunAgentOptions {
   rawHistory?: ChatMessage[];
   unattended?: boolean;
   outputSchema?: Record<string, unknown>;
+  drainSteering?: () => string[];
 }
 
 export async function* runAgent(
@@ -110,5 +111,6 @@ export async function* runAgent(
     rawHistory: options.rawHistory,
     unattended: options.unattended,
     outputSchema: options.outputSchema,
+    drainSteering: options.drainSteering,
   });
 }

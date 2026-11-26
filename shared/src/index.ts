@@ -139,7 +139,9 @@ export type AgentEvent =
   | { type: 'open_browser'; url: string; key?: string; partition?: string; title?: string }
   // 结构化提问：ask_user 命中即**暂停本轮**（后面没有 done，前端发起时不要等流结束）
   // 用户答复作为下一条 user 消息发出，模型接着往下做。
-  | { type: 'ask'; questions: AskQuestion[] };
+  | { type: 'ask'; questions: AskQuestion[] }
+  // 强行提醒未消费回执：本轮提前结束时把未送达模型的 steer id 回传前端，前端回滚进队列不丢消息
+  | { type: 'steer_unconsumed'; ids: string[] };
 
 /** 上传的文件附件（内容随请求发送，后端拼进 user message） */
 export interface Attachment {
@@ -548,6 +550,10 @@ export interface SessionSummary {
  * 模型能力清单：2026-11-20 用真实图片对网关 37 个模型的实测结果。
  * 只有这些模型能真正读懂 image_url part（其余会答"看不到图片"）。
  * 前后端共用：前端画 👁 标识，后端做"图片转文字"转交。
+ *
+ * 注意：图片只在发送的那一轮作为 image part 发给模型，历史消息里只剩 @"文件名" 占位。
+ * 后续轮次模型答"看不到图"，是图片没落盘、没有路径可读，不是模型读不了图
+ * （见 server/src/attachments.ts：图片落盘后路径会随历史一起给模型）。
  */
 export const VISION_MODELS = new Set([
   'gpt-6-astra', 'gpt-6-luna', 'gpt-6.1-sol', 'gpt-6.2-sol', 'gpt-6.2-astra', 'codex-auto-review',

@@ -50,6 +50,7 @@ import { isImageModel } from './tools/image-gen.js';
 import { describeImage } from './vision.js';
 import { addRun, deleteTask, getTask, listRuns, listTasks, touchTask, upsertTask } from './db.js';
 import { composeChatMessages } from './chat-input.js';
+import { listSessionAttachments, persistAttachments } from './attachments.js';
 import { generateTitle } from './title.js';
 import { rollbackAfter } from './snapshots.js';
 import { runTask, startScheduler } from './scheduler.js';
@@ -612,6 +613,45 @@ app.post('/api/context/handoff', async (c) => {
   }
 });
 
+// 正在运行的会话强行提醒队列（sessionId → 待注入条目列表，带 id 以便未消费时通知前端回滚）
+interface SteerEntry { id: string; text: string }
+const activeSteerQueues = new Map<string, SteerEntry[]>();
+
+app.post('/api/chat/steer', async (c) => {
+  let body: { id?: string; sessionId?: string; text?: string; attachments?: ChatRequest['attachments']; skillIds?: string[] };
+  try {
+    body = await c.req.json();
+  } catch {
+    return c.json({ ok: false, error: '请求体不是合法 JSON' }, 400);
+  }
+  const sid = String(body.sessionId || '').trim();
+  const q = sid ? activeSteerQueues.get(sid) : undefined;
+  if (!q) return c.json({ ok: true, injected: false });
+
+  const parts: string[] = [];
+  if (body.text?.trim()) parts.push(body.text.trim());
+  const atts = body.attachments || [];
+  if (atts.length) {
+    await persistAttachments(atts, { sessionId: sid });
+    // 与普通消息一致：只给路径清单，正文由模型按需调 read_image / read_file / document_text 读取
+    const attDesc = atts.map((a) => {
+      if (a.kind === 'image') return `[附带图片：${a.name}${a.localPath ? ` (${a.localPath}，需要查看画面可调用 read_image)` : ''}]`;
+      return `[附带文件：${a.name}${a.localPath ? ` (${a.localPath}，需要读取内容可调用 read_file 或 document_text)` : ''}]`;
+    }).join('\n');
+    parts.push(attDesc);
+  }
+  if (body.skillIds?.length) {
+    for (const id of body.skillIds) {
+      const content = await loadSkillContent(id);
+      if (content) parts.push(`<skill id="${id}">\n${content}\n</skill>`);
+    }
+  }
+  const combined = parts.join('\n\n').trim();
+  if (!combined) return c.json({ ok: false, error: '提醒内容为空' }, 400);
+  q.push({ id: String(body.id || ''), text: combined });
+  return c.json({ ok: true, injected: true });
+});
+
 app.post('/api/chat', (c) => {
   return streamSSE(c, async (stream) => {
     // 前端点停止/断开 SSE → 中断网关上游请求和后续工具轮次（不是只断浏览器连接）
@@ -692,6 +732,16 @@ app.post('/api/chat', (c) => {
       }
     }
 
+    // 附件先落盘（~/.paw/attachments/<会话>/）：图片和文件都存一份真实文件，
+    // composeChatMessages 把 @ 引用统一改写成这些真实路径，后续轮次模型照路径就能找回。
+    await persistAttachments(body.attachments || [], { sessionId: body.sessionId });
+
+    // 已落盘附件的「原名 → 本机路径列表（升序）」索引：同名文件（多张 image.png）按历史顺序一一对应
+    const persistedPaths: Record<string, string[]> = {};
+    for (const s of await listSessionAttachments(body.sessionId)) {
+      (persistedPaths[s.key] ??= []).push(s.path);
+    }
+
     // 图片转交：模型不支持读图但有图片 → 先用视觉模型识别成文字，喂给原模型继续。
     // （网关是单请求单上游转发，做不了跨模型串联；这活在 Agent 编排层做）
     const imageAtts = (body.attachments || []).filter((a) => a.kind === 'image');
@@ -724,6 +774,7 @@ app.post('/api/chat', (c) => {
       attachments: body.attachments || [],
       imageDescriptions,
       canSeeImages: canSeeImages(model),
+      persistedPaths,
     });
     const parentSessionId = body.parentSessionId
       || body.handoff?.fromSessionId
@@ -738,6 +789,8 @@ app.post('/api/chat', (c) => {
     let replyText = '';
     const toolNames: string[] = [];
 
+    const steerQ: SteerEntry[] = [];
+    if (body.sessionId) activeSteerQueues.set(body.sessionId, steerQ);
     try {
       for await (const ev of runAgent({ ...cfg, model }, composed.messages, {
         images: composed.imageUrls.length ? composed.imageUrls : undefined,
@@ -748,6 +801,7 @@ app.post('/api/chat', (c) => {
         turnId: body.turnId,
         connectionCode: body.connectionCode,
         rawHistory: body.messages,
+        drainSteering: () => (steerQ.length ? steerQ.splice(0).map((e) => e.text) : []),
       })) {
         if (abortCtrl.signal.aborted) break;
         if (ev.type === 'text') { replyText += ev.delta; if (runMeta) runOutput += ev.delta; }
@@ -761,6 +815,17 @@ app.post('/api/chat', (c) => {
       if (abortCtrl.signal.aborted || stream.aborted) return; // 用户停止，不推错误
       runOk = false;
       await stream.writeSSE({ data: JSON.stringify({ type: 'error', message: (e as Error).message }) });
+    } finally {
+      if (body.sessionId && activeSteerQueues.get(body.sessionId) === steerQ) {
+        activeSteerQueues.delete(body.sessionId);
+      }
+      // 若本轮因 done/error/__LIMIT__/abort 提前退出而 steerQ 里仍有未消费的插话，通知前端回滚进队列，绝不静默丢消息
+      if (steerQ.length && !stream.aborted) {
+        const ids = steerQ.map((e) => e.id).filter(Boolean);
+        if (ids.length) {
+          await stream.writeSSE({ data: JSON.stringify({ type: 'steer_unconsumed', ids }) }).catch(() => {});
+        }
+      }
     }
     if (runMeta && !abortCtrl.signal.aborted) {
       addRun({

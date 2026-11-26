@@ -6,6 +6,7 @@ import { PluginRegistry, type PawPlugin } from '@paw/kernel';
 import type { Hono } from 'hono';
 import type { ServerPawPlugin, ServerToolExecCtx } from './types.js';
 import { workspaceFsPlugin } from './workspace-fs.js';
+import { imagePlugin } from './image.js';
 import { shellPlugin } from './shell.js';
 import { gitPlugin } from './git.js';
 import { webPlugin } from './web.js';
@@ -47,6 +48,7 @@ export function configurePluginsGateway(cfg: { baseUrl: string; apiKey: string }
 /** 通用标准插件（可随开源版本直接发布） */
 export const STANDARD_PLUGINS: PawPlugin<ServerToolExecCtx>[] = [
   workspaceFsPlugin,
+  imagePlugin,
   shellPlugin,
   gitPlugin,
   webPlugin,

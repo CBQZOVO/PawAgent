@@ -1,11 +1,10 @@
 import { memo, useEffect, useState } from 'react';
-import ReactMarkdown from 'react-markdown';
-import remarkGfm from 'remark-gfm';
 import { ArrowRightLeft, Brain, Check, ChevronDown, Copy, CornerUpLeft, FileText, Link2, Pencil, Sparkles } from 'lucide-react';
 import { messageText, splitAttachmentPlaceholders, type ContentBlock, type ToolCallBlock, type ViewMessage } from '@paw/shared';
 import { extractSources } from '../lib/search-results';
 import { extractSkillRefs } from '../lib/skill-refs';
 import { attachmentKey } from '../lib/attachments';
+import Markdown from './Markdown';
 import AttachmentHoverArea from './AttachmentHoverArea';
 import MessageEditor from './composer/MessageEditor';
 import SourcesBlock from './SourcesBlock';
@@ -127,7 +126,7 @@ function MessageRow({ m, fallbackModel, streaming, onOpenSession, onPreviewAttac
               </button>
               {showHandoff && (
                 <div className="msg-handoff-body">
-                  <ReactMarkdown remarkPlugins={[remarkGfm]}>{m.handoff.summary}</ReactMarkdown>
+                  <Markdown>{m.handoff.summary}</Markdown>
                   {onOpenSession && (
                     <button type="button" className="msg-handoff-jump" onClick={() => onOpenSession(m.handoff!.fromSessionId)}>
                       查看原会话 →
@@ -279,7 +278,7 @@ function MessageRow({ m, fallbackModel, streaming, onOpenSession, onPreviewAttac
                 const src = extractSources(b.text);
                 return (
                   <div className="answer" key={`htxt-${i}`}>
-                    <ReactMarkdown remarkPlugins={[remarkGfm]}>{src?.body ?? b.text}</ReactMarkdown>
+                    <Markdown>{src?.body ?? b.text}</Markdown>
                     <SourcesBlock items={src?.items || []} />
                   </div>
                 );
@@ -328,7 +327,7 @@ function MessageRow({ m, fallbackModel, streaming, onOpenSession, onPreviewAttac
         const src = extractSources(it.block.text);
         return (
           <div className="answer" key={`txt-${i}`}>
-            <ReactMarkdown remarkPlugins={[remarkGfm]}>{src?.body ?? it.block.text}</ReactMarkdown>
+            <Markdown>{src?.body ?? it.block.text}</Markdown>
             <SourcesBlock items={src?.items || []} />
           </div>
         );
