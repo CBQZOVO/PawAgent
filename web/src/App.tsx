@@ -718,7 +718,9 @@ export default function App() {
   };
 
   /**
-   * 回退：把对话和产物恢复到这条用户消息**之前**（这条也去掉），不重发。
+   * 回退：把对话和产物恢复到这条用户消息**之前**，同时把这条消息的正文/附件/技能
+   * 放回输入框——回滚不等于丢弃，用户改完可以直接重发。
+   * （2026-11-26 用户反馈：暂停后点回滚，消息既没进编辑器也没了，全丢。）
    * 跟「编辑重发」的区别：那个会带新内容继续跑，这个纯粹往回退。
    */
   const revertTo = async (sid: string, msgId: string) => {
@@ -727,6 +729,7 @@ export default function App() {
     const idx = s.messages.findIndex((m) => m.id === msgId);
     if (idx < 0 || s.messages[idx].role !== 'user') return;
     const msg = s.messages[idx];
+    const text = messageText(msg);
     const kept = s.messages.slice(0, idx);
     const r = await rewindFiles(sid, msg.ts);
     if (r.restored.length || r.skipped.length) {
@@ -738,6 +741,11 @@ export default function App() {
       updatedAt: Date.now(),
       title: kept.some((m) => m.role === 'user') ? x.title : 'Paw',
     } : x));
+    // 内容回到输入框：已有草稿就追加，不覆盖；附件/技能去重后放回
+    setInput((prev) => (prev.trim() ? `${prev}\n${text}` : text));
+    if (msg.attachments?.length) addRefs(msg.attachments);
+    if (msg.skillIds?.length) setSelectedSkills(msg.skillIds);
+    setTimeout(() => focusRef.current?.focus(), 20);
   };
 
   /**
@@ -1384,7 +1392,7 @@ export default function App() {
       {revertAsk && (
         <ConfirmDialog
           title="将对话回退到此消息前？"
-          body="回退后，会话内容将恢复到此消息之前，请谨慎操作"
+          body="回退后，对话恢复到此消息之前，这条消息的内容会回到输入框（可修改后重发），AI 改动的文件会一并还原"
           confirmText="回退"
           onCancel={() => setRevertAsk(null)}
           onConfirm={() => {
