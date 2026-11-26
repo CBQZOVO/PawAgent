@@ -88,9 +88,11 @@ function fileAttachmentBlock(a: Attachment): string {
   const explicitRef = !/^[^/\\]+$/.test(a.name) || a.content.startsWith('（');
   if (explicitRef) return `<file name="${a.name}" mime="${a.mime}" size="${a.size}">\n${a.content}\n</file>`;
   const path = a.localPath ? ` local_path="${a.localPath}"` : '';
-  const tool = /\.(docx?|xlsx?|csv|pptx?|pdf|jpe?g|png|bmp|tif|txt|md|html)$/i.test(a.name)
+  const tool = /\.(pptx?|docx|xlsx?|csv|txt|md|html?|pdf)$/i.test(a.name)
     ? '用户要读原文且没有特殊格式要求时，直接调用 document_text 解析后阅读，不需要使用文档 SKILL；需要 JSON 结果用 document_parse output=json，需要按页/标题组织时调用 document_outline。'
-    : '需要内容时调用 read_file。';
+    : /\.(png|jpe?g|bmp|gif|webp)$/i.test(a.name)
+      ? '需要看图片内容时调用 read_image 按路径读取。'
+      : '需要内容时调用 read_file。';
   return `<file name="${a.name}" mime="${a.mime}" size="${a.size}"${path}>已附加，正文未注入对话。${tool}</file>`;
 }
 

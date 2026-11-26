@@ -35,7 +35,7 @@ export const workspaceFsPlugin: PawPlugin<ServerToolExecCtx> = {
         }
         const full = await readFile(abs, 'utf-8');
         if (full.includes('\u0000')) {
-          throw new Error(`该文件包含二进制数据（${abs}），read_file 只用于纯文本代码/配置；图片请改用 read_image，Office/PDF 请改用 document_text 解析`);
+          throw new Error(`该文件包含二进制数据（${abs}），read_file 只用于纯文本代码/配置；图片请改用 read_image，Office/PDF 文档请改用 document_text 解析`);
         }
         const lines = full.split('\n');
         const offset = Math.max(1, Number(args.offset) || 1);
