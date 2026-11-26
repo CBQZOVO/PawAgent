@@ -49,6 +49,17 @@ async function readPersonaFiles(): Promise<{ mtime: number; files: string }> {
   return { mtime: latest, files };
 }
 
+/** 输出格式：数学公式必须用 LaTeX（渲染层只认 $...$），不许用 Unicode 拼纯文本公式。
+ *  2026-11-26《信息检索》会话：模型读了纯文本课件后把公式写成 PR(vᵢ)=(1−d)/N+d·Σ_{j∈M(i)}，
+ *  渲染层无从识别，用户看到的就是乱码样的字符。 */
+const OUTPUT_RULES = [
+  '<output_format>',
+  '1. 数学公式一律用 LaTeX 书写：行内公式用 $...$（如 $E=mc^2$、$k_1$），独立公式块用 $$...$$。不要用 Unicode 符号（Σ、∈、ᵢ、√、·）拼纯文本公式——界面无法渲染它们，用户看到的是乱码样的字符。',
+  '2. 引用课件/文档/PPT 里的公式时同样转写为 LaTeX；上标用 ^、下标用 _（如 $PR(v_i)$、$w = (1+\\log tf)\\cdot\\log(N/df)$）。',
+  '3. $ 只用于数学公式；代码、路径、命令照旧用反引号包裹，不要混用。',
+  '</output_format>',
+].join('\n');
+
 /** 证据纪律：独立于 SOUL.md，换人设也生效。专治「没干说干完、被抓包后道歉表演」。 */
 const EVIDENCE_RULES = [
   '<evidence_discipline priority="highest">',
@@ -118,6 +129,8 @@ export async function loadPersonaPrompt(workspace?: string | null): Promise<stri
     '<system-reminder data-role="user-context">',
     ...identitySection,
     EVIDENCE_RULES,
+    '',
+    OUTPUT_RULES,
     '',
     EXECUTION_PLAYBOOK,
     ...(workspaceBlock ? ['', workspaceBlock] : []),
