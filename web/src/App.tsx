@@ -54,7 +54,7 @@ const MSG_PAGE = 40;
 export default function App() {
   // 会话（SQLite + localStorage）
   const {
-    sessions, setSessions, activeId, setActiveId, ready, ensureLoaded,
+    sessions, setSessions, activeId, setActiveId: setActiveIdRaw, ready, ensureLoaded,
     createSession, deleteSession, applyEvent, applyEvents,
   } = useSessions();
 
@@ -91,6 +91,33 @@ export default function App() {
   const [modelsRefreshing, setModelsRefreshing] = useState(false);
   const modelsRefreshingRef = useRef(false);
   const [modelSearch, setModelSearch] = useState('');
+  // 按会话隔离的输入草稿与模型选择：切走时保存当前会话的，切回时恢复目标会话的，互不串扰
+  const draftsRef = useRef<Map<string, string>>(new Map());
+  const sessionModelsRef = useRef<Map<string, string>>(new Map());
+  const inputRef = useRef(input);
+  inputRef.current = input;
+  const modelRef = useRef(model);
+  modelRef.current = model;
+  /** 切换会话：统一走这里，别直接调 setActiveIdRaw（否则草稿/模型选择会丢或串台） */
+  const switchSession = (id: string) => {
+    const cur = currentSession.current;
+    if (cur !== id) {
+      if (cur) {
+        draftsRef.current.set(cur, inputRef.current);
+        if (modelRef.current) sessionModelsRef.current.set(cur, modelRef.current);
+      }
+      const draft = id ? (draftsRef.current.get(id) ?? '') : '';
+      if (id) draftsRef.current.delete(id);
+      if (inputRef.current !== draft) { inputRef.current = draft; setInput(draft); }
+      const savedModel = id ? sessionModelsRef.current.get(id) : undefined;
+      if (savedModel && savedModel !== modelRef.current && models.some((m) => m.id === savedModel)) {
+        modelRef.current = savedModel;
+        setModel(savedModel);
+      }
+    }
+    currentSession.current = id;
+    setActiveIdRaw(id);
+  };
   const [provider, setProvider] = useState<SearchProvider>('deepseek');
   const [hasKey, setHasKey] = useState(true);
   const [providerMenu, setProviderMenu] = useState(false);
@@ -366,9 +393,9 @@ export default function App() {
     nextWorkspaceRef.current = { value: workspace };
     void setWorkspace(workspace);
     setIdeRoot(workspace); // IDE 面板立即可用（不必等第一条消息）
-    setActiveId('');
+    switchSession('');
+    if (inputRef.current) { inputRef.current = ''; setInput(''); }
     setPage('chat');
-    setInput('');
     clearFiles();
     setSelectedSkills([]);
     setError('');
@@ -480,7 +507,8 @@ export default function App() {
         targetId = createSession({ title: titleFromText(text), source, taskId, workspace: ws || undefined });
         dispatchingIdsRef.current.delete('__creating__');
         dispatchingIdsRef.current.add(targetId);
-        setActiveId(targetId);
+        if (mdl) sessionModelsRef.current.set(targetId, mdl);
+        switchSession(targetId);
       } else {
         if (runningIds.has(sid!)) {
           dispatchingIdsRef.current.delete(sid!);
@@ -530,6 +558,9 @@ export default function App() {
     let sawDone = false;
     let sawAsk = false;
     let sawError = false;
+    // 正文与工具调用计数：模型“正常结束”但一个字没回时给出明确提示，别静默结束
+    let textChars = 0;
+    let toolCount = 0;
     // 高频流式增量（text / reasoning / tool_progress / 子代理 text）按 16ms 帧合并 setSessions，
     // 关键边界事件（tool_start / tool_done / ask / error / done）立即同步冲刷，兼顾零延迟卡片与低 CPU 渲染开销。
     let eventBuf: AgentEvent[] = [];
@@ -553,6 +584,8 @@ export default function App() {
         handoff, parentSessionId,
       })) {
         lastEventAt = Date.now();
+        if (ev.type === 'text') textChars += (ev.delta || '').trim().length;
+        if (ev.type === 'tool_start') toolCount++;
         if (ev.type === 'context_usage') {
           setContextReadings((prev) => {
             const next = new Map(prev);
@@ -622,6 +655,10 @@ export default function App() {
         if (ev.type === 'tool_start') m0tools.set(ev.id, ev.args || {});
       }
       flushEvents();
+      // 模型正常返回 done 但正文一个字没有、工具也没调用：如实提示，别让这轮静默结束
+      if (sawDone && !sawAsk && !sawError && textChars === 0 && toolCount === 0) {
+        applyEvent(targetId!, { type: 'error', message: '模型没有返回任何内容，本轮已结束。可点击重试，或换个模型再试' }, assistantMsg.id);
+      }
       // 流结束了但既没有 done 也没有 error/ask：服务端在发事件前就挂了
       // （请求体被拒、进程被 kill）。如实标记，别让这轮看起来“成功但空”。
       if (!sawDone && !sawAsk && !sawError) {
@@ -859,14 +896,17 @@ export default function App() {
       setHandoffDrafts((prev) => new Map(prev).set(newSid, res.handoff));
       if (res.inherited.model && models.some((m) => m.id === res.inherited.model)) {
         setModel(res.inherited.model);
+        sessionModelsRef.current.set(newSid, res.inherited.model);
       }
       setSelectedSkills(res.inherited.skillIds || []);
       setSelectedConnection(res.inherited.connectionCode || null);
       void setWorkspace(ws);
       setIdeRoot(ws);
-      setActiveId(newSid);
+      switchSession(newSid);
       setPage('chat');
-      setInput(goal?.trim() || '');
+      const nextDraft = goal?.trim() || '';
+      inputRef.current = nextDraft;
+      setInput(nextDraft);
       clearFiles();
       setCompactNotice({ sid: newSid, text: `已从「${session.title}」生成交接单，确认或修改后发送首条消息即可继续` });
       setTimeout(() => focusRef.current?.focus(), 60);
@@ -886,7 +926,7 @@ export default function App() {
       if (!full) { setError('目标会话不存在或已被删除'); return; }
       setSessions((prev) => [full, ...prev]);
     }
-    setActiveId(targetSid);
+    switchSession(targetSid);
     setPage('chat');
     void ensureLoaded(targetSid);
   };
@@ -926,6 +966,7 @@ export default function App() {
         return next;
       });
       setInput('');
+      inputRef.current = ''; // 同 tick 内可能的 switchSession 依赖它，避免把已发送内容误存成草稿
       clearFiles();
       setSelectedSkills([]);
       focusRef.current?.focus();
@@ -948,6 +989,7 @@ export default function App() {
     }
     // 先同步清空输入框（否则要等模型整段生成完才清，草稿卡在框里）
     setInput('');
+    inputRef.current = ''; // dispatch 里马上会 switchSession，必须同步清，否则已发送内容被误存成旧会话草稿
     clearFiles();
     setSelectedSkills([]);
     debugLog(`SEND content="${text.slice(0, 120)}" atts=[${sentAttachments.map((a) => a.name).join(', ')}]`);
@@ -1058,7 +1100,7 @@ export default function App() {
       if (!full) { setError('子会话不存在或已被清理'); return; }
       setSessions((prev) => [full, ...prev]);
     }
-    setActiveId(id);
+    switchSession(id);
     setPage('chat');
     void ensureLoaded(id);
   };
@@ -1072,7 +1114,7 @@ export default function App() {
       if (!full) { setError('主会话不存在或已被清理'); return; }
       setSessions((prev) => [full, ...prev]);
     }
-    setActiveId(id);
+    switchSession(id);
     setPage('chat');
     void ensureLoaded(id);
   };
@@ -1091,7 +1133,7 @@ export default function App() {
         onSelect={(id) => {
           const s = sessions.find((x) => x.id === id);
           nextWorkspaceRef.current = null;
-          setActiveId(id);
+          switchSession(id);
           setPage('chat');
           if (s) void setWorkspace(s.workspace ?? null); // 续聊沿用会话自己的工作区
         }}
@@ -1100,6 +1142,12 @@ export default function App() {
           // 删除正在流式的会话先掐掉流：否则模型在后台把整轮跑完，白烧 token
           const ctrl = abortMap.current.get(id);
           if (ctrl) { ctrl.abort(); abortMap.current.delete(id); }
+          draftsRef.current.delete(id);
+          sessionModelsRef.current.delete(id);
+          if (currentSession.current === id) {
+            currentSession.current = '';
+            if (inputRef.current) { inputRef.current = ''; setInput(''); }
+          }
           deleteSession(id);
         }}
         onHandoffSession={(id) => void handoff(id)}
@@ -1130,7 +1178,7 @@ export default function App() {
          page === 'tasks' ? <TasksPage key={tasksTab} initialTab={tasksTab} onRunInChat={runTaskInChat}
            onOpenSession={(r: TaskRunWithName) => {
              const s = sessions.find((x) => x.runId === r.id);
-             if (s) { setActiveId(s.id); setPage('chat'); }
+             if (s) { switchSession(s.id); setPage('chat'); }
            }} /> :
          page === 'memory' ? <MemoryPage /> : (
         <div className={'chat-layout' + (mode === 'ide' ? ' ide-mode' : (sideCollapsed ? ' side-collapsed' : '')) + (mode === 'ide' && chatMax ? ' chat-max' : '') + (mode === 'ide' && chatHidden ? ' chat-hidden' : '')} ref={layoutRef}>
@@ -1354,7 +1402,13 @@ export default function App() {
           onToggleModel={toggleModelMenu}
           onCloseModel={() => setModelMenu(false)}
           onModelSearch={setModelSearch}
-          onSelectModel={(id) => { setModel(id); setModelMenu(false); setModelSearch(''); }}
+          onSelectModel={(id) => {
+            modelRef.current = id;
+            setModel(id);
+            // 模型选择按会话记忆：切回该会话时恢复，不把别的会话的选择带过来
+            if (currentSession.current) sessionModelsRef.current.set(currentSession.current, id);
+            setModelMenu(false); setModelSearch('');
+          }}
           queuedMessages={activeId ? (queues.get(activeId) || []) : []}
           onSteerQueued={(id) => void steerQueued(id)}
           onEditQueued={editQueued}

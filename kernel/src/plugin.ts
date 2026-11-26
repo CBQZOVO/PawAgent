@@ -71,6 +71,8 @@ export interface ToToolRuntimeOptions<TExecCtx extends ToolExecutionContext = To
 export class PluginRegistry<TExecCtx extends ToolExecutionContext = ToolExecutionContext> {
   private plugins = new Map<string, PawPlugin<TExecCtx>>();
   private tools = new Map<string, PluginTool<TExecCtx>>();
+  /** 裁剪发生时的宿主回调（如全文落盘供模型 read_file 读回），见 PruneOptions.onTruncate */
+  onTruncate?: (fullContent: string, toolName?: string) => string | void;
 
   register(plugin: PawPlugin<TExecCtx>): this {
     if (this.plugins.has(plugin.name)) {
@@ -144,7 +146,10 @@ export class PluginRegistry<TExecCtx extends ToolExecutionContext = ToolExecutio
         content,
         prunableCountInRound,
         name,
-        tool.meta.pruneHint ? { hint: () => tool.meta!.pruneHint! } : undefined,
+        {
+          ...(tool.meta.pruneHint ? { hint: () => tool.meta!.pruneHint! } : undefined),
+          ...(this.onTruncate ? { onTruncate: this.onTruncate } : undefined),
+        },
       );
     }
     return content;

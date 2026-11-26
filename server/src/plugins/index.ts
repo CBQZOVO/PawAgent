@@ -20,6 +20,7 @@ import {
   type ExternalLoadReport,
   type PluginConfigEntry,
 } from './loader.js';
+import { saveTruncatedOutput } from '../tools/truncated.js';
 
 export type {
   ServerToolExecCtx,
@@ -64,6 +65,8 @@ export const EXTENSION_PLUGINS: PawPlugin<ServerToolExecCtx>[] = [
 export const pawPlugins = new PluginRegistry<ServerToolExecCtx>()
   .registerAll(STANDARD_PLUGINS)
   .registerAll(EXTENSION_PLUGINS);
+// 内置/外置插件的 prunable 工具被裁剪时，全文落盘供模型 read_file 读回（MCP 工具走 tools/prune.ts 的同款逻辑）
+pawPlugins.onTruncate = saveTruncatedOutput;
 
 let externalLoaded = false;
 let loadedExternalInstances: ServerPawPlugin[] = [];

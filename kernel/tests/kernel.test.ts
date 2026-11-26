@@ -69,6 +69,17 @@ assert.equal(isConversationHistory([
 ]), true);
 assert.match(pruneToolResult('z'.repeat(20_000), 5, 'read_file'), /已精简/);
 
+// onTruncate：裁剪发生时同步回调拿全文，返回文本拼进裁剪提示；未裁剪不回调
+let truncatedFull = '';
+const prunedWithNote = pruneToolResult('y'.repeat(20_000), 1, 'search_content', {
+  onTruncate: (full) => { truncatedFull = full; return `完整输出已保存到 /tmp/full.txt`; },
+});
+assert.equal(truncatedFull.length, 20_000, 'onTruncate 应拿到未裁剪的全文');
+assert.match(prunedWithNote, /完整输出已保存到 \/tmp\/full\.txt/);
+let called = false;
+assert.equal(pruneToolResult('short', 1, 'x', { onTruncate: () => { called = true; } }), 'short');
+assert.equal(called, false, '未触发裁剪时不应回调 onTruncate');
+
 // 3. PluginRegistry：注册工具元信息、动态可用性、自定义历史裁剪与直接转 ToolRuntime
 const { PluginRegistry } = await import('../src/index.js');
 const reg = new PluginRegistry();
@@ -99,6 +110,10 @@ assert.equal(reg.isReadOnly('demo_read'), true);
 assert.equal(reg.isMutating('demo_write', { dry_run: true }), false);
 assert.equal(reg.isMutating('demo_write', { dry_run: false }), true);
 assert.match(reg.formatHistoryResult('demo_read', 'A'.repeat(15_000), 1)!, /请缩小查询范围/);
+// 注册表级 onTruncate：prunable 工具裁剪时经注册表钩子拿到全文并拼提示
+reg.onTruncate = (full, name) => `落盘(${name}:${full.length})`;
+assert.match(reg.formatHistoryResult('demo_read', 'A'.repeat(15_000), 1)!, /落盘\(demo_read:15000\)/);
+reg.onTruncate = undefined;
 assert.deepEqual(await reg.collectPromptBlocks(), ['<demo_plugin>active</demo_plugin>']);
 const rt = reg.toToolRuntime({ pluginCtx: { allowWrite: true } });
 const rtRes = await rt.execute('demo_write', {}, 'id-1', { depth: 0, emit: () => {} });

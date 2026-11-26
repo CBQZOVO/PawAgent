@@ -9,6 +9,9 @@
 ### Added
 - **Windows (x64) 全面适配与打包**：新增 [build-app.ps1](./build-app.ps1)、[stage-app.mjs](./desktop/scripts/stage-app.mjs) 与 `Paw.ico`，补全 Windows 下的进程树终止（`taskkill`）、隐藏子进程黑窗（`windowsHide`）、PowerShell/cmd 终端参数、Conda/PATH 大小写探测、文件夹选择弹窗及前后端跨平台路径处理。
 - **GitHub Actions 双平台自动构建与 Release**：新增 [.github/workflows/build.yml](./.github/workflows/build.yml)，推送 `v*` tag 时自动并行打包 `Paw-v<version>-macos-arm64.zip` 与 `Paw-v<version>-windows-x64.zip`，校验 tag 与 `package.json` 版本一致后自动发布 GitHub Release。
+- **超长工具输出全文落盘、可按需读回**：工具结果被三档裁剪时，全文自动保存到 `~/.paw/truncated/`（滚动保留最近 100 份），裁剪提示附带落盘路径，模型可用 `read_file` 读回被省略的中段；落盘失败静默降级为原有提示，不影响主流程。
+- **输入草稿与模型选择按会话隔离**：切换会话时自动保存当前会话的输入草稿并恢复目标会话的草稿与上次所选模型，会话之间互不串扰、草稿不再丢失。
+- **模型空回复明确提示**：模型正常结束但正文一个字没有、工具也未调用时，消息区给出明确错误提示，不再静默结束。
 
 ### Changed
 - **技能目录统一归拢**：默认技能目录从 `~/pawskill` 迁移至 `~/.paw/skill`（支持 `PAW_DATA_DIR` / `PAW_SKILLS_DIR` 覆盖）。

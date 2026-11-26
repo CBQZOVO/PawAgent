@@ -290,6 +290,7 @@ await atest('未知子代理名：报错并列出可用清单', async () => {
 
 // ---------- 高效工具集：编辑/后台/抓取/记忆/待办/git ----------
 import { mkdtemp, readFile as fsRead, rm } from 'node:fs/promises';
+import { readFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { htmlToText } from '../src/tools/web-fetch.js';
@@ -653,18 +654,28 @@ await atest('search_content：并发搜索命中并跳过二进制文件，支�
   assert.equal(rAbort.isError, true);
 });
 
-test('pruneToolResult：覆盖 git_diff/web_fetch/MCP 工具并按工具给出准确提示', () => {
+test('pruneToolResult：覆盖 git_diff/web_fetch/MCP 工具并按工具给出准确提示；大输出全文落盘可读回', () => {
   assert.equal(isPrunableTool('git_diff'), true);
   assert.equal(isPrunableTool('web_fetch'), true);
   assert.equal(isPrunableTool('crm__list_orders'), true);
   assert.equal(isPrunableTool('search_parent_session'), true);
   assert.equal(isPrunableTool('todo_write'), false);
 
-  const big = 'A'.repeat(20_000);
-  const prunedRead = pruneToolResult(big, 1, 'read_file');
-  assert.match(prunedRead, /offset\/limit/);
-  const prunedGit = pruneToolResult(big, 3, 'git_diff');
-  assert.match(prunedGit, /file 参数/);
+  const prevDataDir = process.env.PAW_DATA_DIR;
+  process.env.PAW_DATA_DIR = tmp; // 落盘指向测试临时目录，别污染真实 ~/.paw
+  try {
+    const big = 'A'.repeat(20_000);
+    const prunedRead = pruneToolResult(big, 1, 'read_file');
+    assert.match(prunedRead, /offset\/limit/);
+    const m = prunedRead.match(/完整输出已保存到 (.+?\.txt)（/);
+    assert.ok(m, '裁剪提示应包含全文落盘路径');
+    assert.equal(readFileSync(m[1], 'utf-8'), big, '落盘文件应保存未裁剪的全文');
+    const prunedGit = pruneToolResult(big, 3, 'git_diff');
+    assert.match(prunedGit, /file 参数/);
+  } finally {
+    if (prevDataDir === undefined) delete process.env.PAW_DATA_DIR;
+    else process.env.PAW_DATA_DIR = prevDataDir;
+  }
 });
 
 // ---------- 会话交接（Session Handoff）与 search_parent_session ----------

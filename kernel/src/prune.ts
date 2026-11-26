@@ -10,6 +10,8 @@ export interface PruneOptions {
   denseTailChars?: number;
   denseAt?: number;
   hint?: (toolName?: string) => string;
+  /** 裁剪真正发生时同步回调（如全文落盘）。返回的文本会拼进裁剪提示，空/异常则忽略 */
+  onTruncate?: (fullContent: string, toolName?: string) => string | void;
 }
 
 const DEFAULTS = {
@@ -50,7 +52,12 @@ export function pruneToolResult(
       : (opts.normalTailChars ?? DEFAULTS.normalTailChars);
   if (content.length <= head + tail + 500) return content;
   const omitted = content.length - head - tail;
-  const hint = (opts.hint ?? defaultPruneHint)(toolName);
+  let savedNote = '';
+  try {
+    const note = opts.onTruncate?.(content, toolName);
+    if (typeof note === 'string') savedNote = note;
+  } catch { /* 落盘失败不影响裁剪 */ }
+  const hint = [ (opts.hint ?? defaultPruneHint)(toolName), savedNote ].filter(Boolean).join('；');
   return content.slice(0, head)
     + `\n\n…[已精简 ${omitted} 字符（本轮一共 ${readsThisRound} 个大结果调用，全文会让后续每轮请求变慢）。`
     + `${hint}]…\n\n`
