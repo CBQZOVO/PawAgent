@@ -1,10 +1,11 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { ArrowDown, ArrowLeft, ArrowRight, ArrowRightLeft, ChevronUp, Eye, Globe, Maximize2, Minimize2, PanelLeftClose, PanelLeftOpen, Sparkles } from 'lucide-react';
-import { messageText, type AgentEvent, type Attachment, type ContextReading, type HandoffContext, type ScheduledTask, type ViewMessage } from '@paw/shared';
+import { messageText, type AgentEvent, type Attachment, type ContextReading, type HandoffContext, type ScheduledTask, type ViewMessage, type WidgetBlock } from '@paw/shared';
 import {
-  compactContext, createHandoff, generateTitleApi, getModels, getPlugins, getSearchConfig, getSession, getWorkspace, notifyTurnEnd, removeWorkspace as removeWorkspaceApi, rewindFiles, setSearchConfig, setWorkspace, steerChat, streamChat,
-  PLUGINS_CHANGED, WORKSPACE_CHANGED, type ModelInfo, type PluginPageInfo, type SearchProvider,
+  compactContext, createHandoff, generateTitleApi, getModels, getPlugins, getSearchConfig, getSession, getWorkspace, notifyTurnEnd, removeWorkspace as removeWorkspaceApi, resolveBusinessPage, rewindFiles, setSearchConfig, setWorkspace, steerChat, streamChat,
+  PLUGINS_CHANGED, WORKSPACE_CHANGED, type ModelInfo, type PluginPageInfo, type SearchProvider, type WidgetInfo,
 } from './api/client';
+import { widgetBlockFromEvent } from './lib/session-sync';
 import { clearAttachments } from './lib/attachments';
 import { extractSkillRefs } from './lib/skill-refs';
 import { toChatMessages } from './lib/store';
@@ -28,6 +29,8 @@ import ModeMenu from './components/ModeMenu';
 import BackgroundTasks from './components/BackgroundTasks';
 import Tips from './components/Tips';
 import BrowserPanel, { normalizeBrowserUrl } from './components/BrowserPanel';
+import WidgetPanel from './components/WidgetPanel';
+import type { WidgetHostApi } from './components/WidgetFrame';
 import { useColumnResize, storedWidth } from './hooks/useColumnResize';
 import { useElementWidth } from './hooks/useElementWidth';
 import { useStickToBottom } from './hooks/useStickToBottom';
@@ -129,6 +132,8 @@ export default function App() {
   const [previewRequest, setPreviewRequest] = useState<{ id: number; attachment?: Attachment; path?: string } | null>(null);
   /** 内置浏览器：点回答链接自动打开；与文件预览共用右侧区域，不同时开 */
   const [browserOpen, setBrowserOpen] = useState(false);
+  /** 部件 open_business_page(mode: 'modal') 时把浏览器面板抬成浮层 */
+  const [browserModal, setBrowserModal] = useState(false);
   const [browserRequest, setBrowserRequest] = useState<{
     id: number; url: string; key?: string; title?: string; partition?: string;
   } | null>(null);
@@ -137,6 +142,17 @@ export default function App() {
   const browserResize = useColumnResize(browserWidth, setBrowserWidth, {
     min: 420, max: 1000, storeKey: 'paw-browser-width', defaultWidth: 560, invert: true,
   });
+  /** 自定义部件：清单跟随插件热重载，面板实例按消息块 id 绑定 */
+  const [widgetSpecs, setWidgetSpecs] = useState<WidgetInfo[]>([]);
+  const [widgetPanel, setWidgetPanel] = useState<{ block: WidgetBlock; messageId?: string } | null>(null);
+  const [widgetFull, setWidgetFull] = useState(false);
+  const widgetW = () => storedWidth('paw-widget-width', 560, 420, 1000);
+  const [widgetWidth, setWidgetWidth] = useState(widgetW);
+  const widgetSendRef = useRef<(text: string) => void>(() => {});
+  const widgetResize = useColumnResize(widgetWidth, setWidgetWidth, {
+    min: 420, max: 1000, storeKey: 'paw-widget-width', defaultWidth: 560, invert: true,
+  });
+  useEffect(() => { setWidgetPanel(null); }, [activeId]);
   const [page, setPage] = useState<'chat' | 'tools' | 'tasks' | 'memory' | 'plugin'>('chat');
   const [pluginPages, setPluginPages] = useState<PluginPageInfo[]>([]);
   const [activePluginPageKey, setActivePluginPageKey] = useState<string | null>(null);
@@ -146,6 +162,8 @@ export default function App() {
         .then((inv) => {
           const pages = inv.pages || [];
           setPluginPages(pages);
+          setWidgetSpecs(inv.widgets || []);
+          setWidgetPanel((prev) => (prev && !(inv.widgets || []).some((w) => w.key === prev.block.widgetId) ? null : prev));
           setActivePluginPageKey((prev) => (prev && !pages.some((p) => p.key === prev) ? null : prev));
         })
         .catch(() => undefined);
@@ -258,8 +276,10 @@ export default function App() {
     const url = normalizeBrowserUrl(raw);
     if (!url) return;
     setBrowserRequest({ id: Date.now() + Math.random(), url, key, partition, title });
+    setBrowserModal(false);
     setBrowserOpen(true);
     setFilePanelOpen(false);
+    setWidgetPanel(null);
   }, []);
 
   // 一条捕获拦截覆盖所有外链（回答正文 / 搜索结果 / 工具卡片 / Markdown 预览）：
@@ -626,6 +646,27 @@ export default function App() {
         if (ev.type === 'open_browser') {
           openBrowserUrl(ev.url, ev.key, ev.partition, ev.title);
           continue;
+        }
+        if (ev.type === 'widget' && ev.autoOpen) {
+          setWidgetPanel({ block: widgetBlockFromEvent(ev), messageId: assistantMsg.id });
+          setWidgetFull(false);
+          setBrowserOpen(false);
+          setFilePanelOpen(false);
+        }
+        if (ev.type === 'done') {
+          setWidgetPanel((prev) => prev && prev.messageId === assistantMsg.id && prev.block.status === 'streaming'
+            ? { ...prev, block: { ...prev.block, status: 'ready' } } : prev);
+        }
+        if (ev.type === 'widget_update') {
+          setWidgetPanel((prev) => prev && prev.block.id === ev.id ? {
+            ...prev,
+            block: {
+              ...prev.block,
+              ...(ev.data !== undefined ? { data: ev.data } : {}),
+              ...(ev.options !== undefined ? { options: ev.options } : {}),
+              ...(ev.status !== undefined ? { status: ev.status } : {}),
+            },
+          } : prev);
         }
         const isHighFreqDelta = ev.type === 'text'
           || ev.type === 'reasoning'
@@ -995,6 +1036,7 @@ export default function App() {
     debugLog(`SEND content="${text.slice(0, 120)}" atts=[${sentAttachments.map((a) => a.name).join(', ')}]`);
     void dispatch(text, model, sentAttachments, skills, activeId, undefined, undefined, undefined, selectedConnection || undefined, activeDraft);
   };
+  widgetSendRef.current = send;
 
   /** 队列操作：从当前会话队列中取出并删除指定项 */
   const popQueuedItem = (sid: string, id: string): QueuedMessage | undefined => {
@@ -1090,6 +1132,48 @@ export default function App() {
     markStreamStopped(activeId); // 立即解除“生成中”，不依赖流是否及时抛 AbortError
     ctrl.abort();
   };
+
+  /** 部件 Bridge 的宿主侧实现：回调稳定，避免长会话里每次 render 都重渲染所有消息 */
+  const widgetHost = useMemo<WidgetHostApi>(() => ({
+    widgets: widgetSpecs,
+    sessionId: activeId || undefined,
+    onSendMessage: (text) => widgetSendRef.current(text),
+    onSaveState: (blockId, state) => {
+      setSessions((prev) => {
+        let changed = false;
+        const next = prev.map((s) => {
+          let sChanged = false;
+          const messages = s.messages.map((m) => {
+            if (!m.content.some((b) => b.type === 'widget' && b.id === blockId)) return m;
+            sChanged = true;
+            return { ...m, content: m.content.map((b) => b.type === 'widget' && b.id === blockId ? { ...b, state } : b) };
+          });
+          if (!sChanged) return s;
+          changed = true;
+          return { ...s, messages };
+        });
+        return changed ? next : prev;
+      });
+      setWidgetPanel((prev) => prev && prev.block.id === blockId ? { ...prev, block: { ...prev.block, state } } : prev);
+    },
+    onOpenPanel: (block, messageId) => {
+      setWidgetPanel({ block, messageId });
+      setWidgetFull(false);
+      setBrowserOpen(false);
+      setFilePanelOpen(false);
+    },
+    onClosePanel: () => setWidgetPanel(null),
+    onOpenBusinessPage: (block, payload) => {
+      const code = block.connectionCode || widgetSpecs.find((w) => w.key === block.widgetId)?.defaultConnection;
+      if (!code) { setError('该部件未绑定系统连接，无法打开业务页面'); return; }
+      void resolveBusinessPage(code, { path: payload.path, query: payload.query, title: payload.title })
+        .then((r) => {
+          openBrowserUrl(r.url, `widget:${block.id}:${payload.path || ''}`, r.partition, r.title || payload.title);
+          if (payload.mode === 'modal') setBrowserModal(true);
+        })
+        .catch((e) => setError((e as Error).message));
+    },
+  }), [widgetSpecs, activeId, openBrowserUrl, setSessions]);
 
   /** 打开子代理会话：记住来源页，返回时不用在左侧列表里翻 */
   const subagentReturnRef = useRef<Map<string, string>>(new Map());
@@ -1344,7 +1428,8 @@ export default function App() {
                     }}
                     onRewind={runningIds.has(active.id) ? undefined : (text, atts) => rewindTo(active.id, m.id, text, atts)}
                     onRevert={() => setRevertAsk({ sid: active.id, msgId: m.id })}
-                    onAnswerAsk={(text) => void answerAsk(active.id, text)} />;
+                    onAnswerAsk={(text) => void answerAsk(active.id, text)}
+                    widgetHost={widgetHost} />;
                 })}
                 {active.handoffTo && (
                   <div className="handoff-to-banner">
@@ -1416,13 +1501,26 @@ export default function App() {
           onSend={send} onStop={stop}
         />
         </div>
-        {browserOpen && (
+        {widgetPanel && !browserOpen && (
+          <>
+            {!widgetFull && (
+              <div className="col-resizer browser-resizer" title="拖动调整部件面板宽度（双击还原）" {...widgetResize} />
+            )}
+            <WidgetPanel block={widgetPanel.block} messageId={widgetPanel.messageId} host={widgetHost} width={widgetWidth} full={widgetFull}
+              onToggleFull={() => setWidgetFull((v) => !v)} onClose={() => setWidgetPanel(null)} />
+          </>
+        )}
+        {browserOpen && browserModal ? (
+          <div className="widget-page-modal">
+            <BrowserPanel request={browserRequest} width={900} onClose={() => { setBrowserOpen(false); setBrowserModal(false); }} />
+          </div>
+        ) : browserOpen ? (
           <>
             <div className="col-resizer browser-resizer" title="拖动调整浏览器宽度（双击还原）" {...browserResize} />
             <BrowserPanel request={browserRequest} width={browserWidth} onClose={() => setBrowserOpen(false)} />
           </>
-        )}
-        {mode !== 'ide' && filePanelOpen && !browserOpen && (
+        ) : null}
+        {mode !== 'ide' && filePanelOpen && !browserOpen && !widgetPanel && (
           <>
             <div className="col-resizer agent-panel-resizer" title="拖动调整预览宽度（双击还原各占一半）" {...panelResizeHalf} />
             <AgentFilePanel files={previewFiles} root={active?.workspace || ideRoot || ''}

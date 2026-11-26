@@ -1,7 +1,7 @@
 // 启动合并测试：服务端为真相源，本地新建保留，已删会话不复活。
 // 运行：pnpm --filter @paw/web test
 import assert from 'node:assert/strict';
-import type { ContentBlock, Session, ViewMessage } from '@paw/shared';
+import { messageText, type ContentBlock, type Session, type ViewMessage } from '@paw/shared';
 import { applyEventsToMessage, applyToolDone, mergeSessions } from '../src/lib/session-sync.js';
 
 let pass = 0;
@@ -88,4 +88,41 @@ test('applyEventsToMessage：并行子代理乱序到达 subagent_start 时按 t
   assert.equal(card1.subagent?.steps[1]?.ok, false, 'in-2 应精确标记失败');
 });
 
-console.log(`\n${pass}/7 通过`);
+test('widget 事件落成消息块，widget_update 按 id 增量更新且不污染正文', () => {
+  const init: ViewMessage = { id: 'm1', role: 'assistant', content: [], ts: 1 };
+  const updated = applyEventsToMessage(init, [
+    { type: 'widget', id: 'w1', widgetId: 'chart:card', data: { n: 1 }, connectionCode: 'crm' },
+    { type: 'widget', id: 'w1', widgetId: 'chart:card', data: { n: 99 } }, // 同 id 重复发射不建两张卡
+    { type: 'widget_update', id: 'w1', data: { n: 2 }, status: 'ready' },
+    { type: 'text', delta: '已完成' },
+  ]);
+  assert.equal(updated.content.length, 2);
+  const b = updated.content[0];
+  assert.equal(b.type, 'widget');
+  if (b.type === 'widget') {
+    assert.deepEqual(b.data, { n: 2 });
+    assert.equal(b.status, 'ready');
+    assert.equal(b.connectionCode, 'crm');
+  }
+  if (updated.content[1].type === 'text') assert.equal(updated.content[1].text, '已完成');
+  assert.equal(messageText(updated), '已完成', '部件数据不能进正文/模型历史');
+});
+
+test('done 后未显式 ready 的部件自动收尾', () => {
+  const init: ViewMessage = { id: 'm1', role: 'assistant', content: [], ts: 1 };
+  const updated = applyEventsToMessage(init, [
+    { type: 'widget', id: 'w1', widgetId: 'chart:card' },
+    { type: 'done' },
+  ]);
+  const b = updated.content[0];
+  assert.equal(b.type, 'widget');
+  if (b.type === 'widget') assert.equal(b.status, 'ready');
+});
+
+test('widget_update 找不到块时静默忽略', () => {
+  const init: ViewMessage = { id: 'm1', role: 'assistant', content: [{ type: 'text', text: 'hi' }], ts: 1 };
+  const updated = applyEventsToMessage(init, [{ type: 'widget_update', id: 'ghost', data: 1 }]);
+  assert.equal(updated.content.length, 1);
+});
+
+console.log(`\n${pass} 通过`);

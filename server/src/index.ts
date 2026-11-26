@@ -25,8 +25,10 @@ import {
   listConnectionAuthProviderViews,
   listConnectionSsoProviderViews,
   listConnectionViews,
+  fetchConnectionRaw,
   loadConnections,
   normalizeCode,
+  resolveBusinessPageUrl,
   saveConnections,
   setSecret,
   testConnection,
@@ -38,6 +40,7 @@ import {
   getPluginInventory,
   getPluginRouter,
   getPluginsDir,
+  getWidgetInventory,
   loadExternalPlugins,
   reloadExternalPlugins,
   updateExternalPlugin,
@@ -367,6 +370,56 @@ app.post('/api/connections/:code/test', async (c) => {
     return c.json(await testConnection(code, opts));
   } catch (e) {
     return c.json({ ok: false, reachable: false, status: 0, ms: 0, message: (e as Error).message, path: opts.path || '', method: opts.method || 'GET' });
+  }
+});
+
+/**
+ * 部件请求业务接口的原始代理：复用连接的 baseUrl / 防 SSRF / 密钥注入，
+ * 保留状态码与二进制（不做 call_api 的 16k 截断）。
+ * 允许使用哪条连接由 WidgetFrame 按卡片绑定值与插件白名单在宿主侧收敛，
+ * 这里只做连接本身的安全边界校验。
+ */
+app.all('/api/connections/:code/proxy/*', async (c) => {
+  const code = c.req.param('code').toLowerCase();
+  const rawPath = c.req.path.replace(/^\/api\/connections\/[^/]+\/proxy/, '') || '/';
+  const method = c.req.method;
+  const forwardHeaders: Record<string, string> = {};
+  c.req.raw.headers.forEach((v, k) => {
+    const lower = k.toLowerCase();
+    if (/^(authorization|host|content-length|cookie|connection|origin|referer|user-agent|accept-encoding|sec-.*)$/.test(lower)) return;
+    forwardHeaders[k] = v;
+  });
+  let body: unknown;
+  if (method !== 'GET' && method !== 'HEAD') {
+    const ct = c.req.header('content-type') || '';
+    if (/application\/json/i.test(ct)) body = await c.req.json().catch(() => undefined);
+    else {
+      const buf = await c.req.arrayBuffer().catch(() => null);
+      if (buf && buf.byteLength > 0) body = new Uint8Array(buf);
+    }
+  }
+  try {
+    const r = await fetchConnectionRaw(code, { method, path: rawPath, query: c.req.query(), headers: forwardHeaders, body }, c.req.raw.signal);
+    return new Response(r.bytes as BodyInit, {
+      status: r.status,
+      headers: { 'Content-Type': r.contentType || 'application/octet-stream', 'Cache-Control': 'no-store' },
+    });
+  } catch (e) {
+    return c.json({ error: (e as Error).message }, 400);
+  }
+});
+
+/** 部件里的「打开业务页面」：无 SSO 插件时直接拼安全 URL，有插件则换票 */
+app.post('/api/connections/:code/sso/resolve', async (c) => {
+  const body = await c.req.json().catch(() => ({})) as {
+    path?: string; query?: Record<string, string>; title?: string;
+  };
+  try {
+    return c.json(await resolveBusinessPageUrl(c.req.param('code').toLowerCase(), {
+      path: body.path, query: body.query, title: body.title,
+    }));
+  } catch (e) {
+    return c.json({ error: (e as Error).message }, 400);
   }
 });
 
@@ -858,6 +911,7 @@ app.post('/api/jobs/:id/kill', (c) => c.json({ ok: killJobById(c.req.param('id')
 // 浏览器版的桌面通知（没有桌面壳时前端回落这里）：由前端在「本轮结束」那一刻调用——
 // 窗口焦点只有前端知道，前端只在窗口不在前台时才发这个请求，服务端只管弹。
 app.get('/api/plugins', (c) => c.json(getPluginInventory()));
+app.get('/api/widgets', (c) => c.json({ widgets: getWidgetInventory() }));
 
 const PLUGIN_UI_MIME: Record<string, string> = {
   '.html': 'text/html; charset=utf-8',

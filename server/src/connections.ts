@@ -117,6 +117,17 @@ export interface ConnectionSsoProviderView {
 export interface ConnectionSsoProvider extends ConnectionSsoProviderView {
   promptHint?: string;
   normalize?(sso: Record<string, unknown>, code: string): ConnectionSso;
+
+  /** 可选：把业务相对路径换成免密直达 URL（未实现时默认 baseUrl + path） */
+  resolveSsoUrl?(ctx: {
+    conn: Connection;
+    secret: string | null;
+    targetPath?: string;
+    query?: Record<string, string>;
+  }): Promise<{ url: string; partition?: string; title?: string }>;
+
+  /** 可选：为只认 SSO 会话态的接口在转发前补凭据 */
+  applySsoAuth?(ctx: ConnectionAuthContext): Promise<void> | void;
 }
 
 // ---------------------------------------------------------------- 外部认证/SSO 提供器注册表
@@ -346,7 +357,6 @@ export interface CallOptions {
   headers?: Record<string, string>;
 }
 
-const MAX_BYTES = 2 * 1024 * 1024;
 const MAX_CHARS = 16000;
 
 function buildUrl(conn: Connection, p: string, query?: Record<string, unknown>): URL {
@@ -415,13 +425,13 @@ async function applyAuth(
   body: string | Uint8Array,
   headers: Record<string, string>,
 ): Promise<void> {
+  const secret = await getSecret(conn.code);
   const kind = conn.kind || 'http';
   if (kind !== 'http') {
     const provider = authProviders.get(kind);
     if (!provider) {
       throw new Error(`连接 ${conn.code} 的类型 "${kind}" 需要安装并启用对应的外部插件`);
     }
-    const secret = await getSecret(conn.code);
     await provider.applyAuth({
       conn,
       url,
@@ -432,17 +442,33 @@ async function applyAuth(
       setHeader: (name, value) => setHeader(headers, name, value),
       deleteHeader: (name) => deleteHeader(headers, name),
     });
-    return;
+  } else {
+    for (const [k, v] of Object.entries(authHeaders(conn, secret))) setHeader(headers, k, v);
+    if (conn.auth.type === 'query' && conn.auth.name && secret) {
+      url.searchParams.set(conn.auth.name, secret);
+    }
   }
-
-  const secret = await getSecret(conn.code);
-  for (const [k, v] of Object.entries(authHeaders(conn, secret))) setHeader(headers, k, v);
-  if (conn.auth.type === 'query' && conn.auth.name && secret) {
-    url.searchParams.set(conn.auth.name, secret);
+  // 通用认证之后、发请求之前给外置 SSO 插件一次补凭据的机会；没装插件就什么都不做
+  const sso = conn.sso ? ssoProviders.get(conn.sso.type) : undefined;
+  if (sso?.applySsoAuth) {
+    await sso.applySsoAuth({
+      conn, url, method, body, headers, secret,
+      setHeader: (name, value) => setHeader(headers, name, value),
+      deleteHeader: (name) => deleteHeader(headers, name),
+    });
   }
 }
 
-export async function callConnection(code: string, opts: CallOptions, signal?: AbortSignal): Promise<CallResult> {
+interface PreparedConnectionRequest {
+  conn: Connection;
+  method: string;
+  url: URL;
+  headers: Record<string, string>;
+  body?: string | Uint8Array;
+  displayUrl: string;
+}
+
+async function prepareConnectionRequest(code: string, opts: CallOptions): Promise<PreparedConnectionRequest> {
   const conn = getConnection(code);
   if (!conn) {
     const all = loadConnections().map((c) => c.code).join(', ');
@@ -476,22 +502,38 @@ export async function callConnection(code: string, opts: CallOptions, signal?: A
   }
 
   await applyAuth(conn, url, method, body ?? '', headers);
+  return { conn, method, url, headers, body, displayUrl: `${conn.baseUrl}${url.pathname}` };
+}
 
-  const timeout = AbortSignal.timeout(conn.timeoutMs || 30000);
+/** 原始响应：保留状态码 / Content-Type / 二进制，不做 16k 截断（部件下载与预览走这条） */
+export interface RawConnectionResponse {
+  ok: boolean;
+  status: number;
+  contentType: string;
+  bytes: Uint8Array;
+  ms: number;
+  timedOut: boolean;
+}
+
+const RAW_MAX_BYTES = 20 * 1024 * 1024;
+
+export async function fetchConnectionRaw(code: string, opts: CallOptions, signal?: AbortSignal): Promise<RawConnectionResponse> {
+  const p = await prepareConnectionRequest(code, opts);
+  const timeout = AbortSignal.timeout(p.conn.timeoutMs || 30000);
   const composed = signal ? AbortSignal.any([signal, timeout]) : timeout;
   const started = Date.now();
   let res: Response;
   try {
-    res = await fetch(url, { method, headers, body: body as BodyInit | undefined, signal: composed, redirect: 'follow' });
+    res = await fetch(p.url, { method: p.method, headers: p.headers, body: p.body as BodyInit | undefined, signal: composed, redirect: 'follow' });
   } catch (e) {
-    const msg = (e as Error).name === 'TimeoutError' ? `请求超时（${conn.timeoutMs}ms）` : (e as Error).message;
-    throw new Error(`${method} ${conn.baseUrl}${url.pathname} 失败：${msg}`);
+    const msg = (e as Error).name === 'TimeoutError' ? `请求超时（${p.conn.timeoutMs}ms）` : (e as Error).message;
+    throw new Error(`${p.method} ${p.displayUrl} 失败：${msg}`);
   }
 
   const reader = res.body?.getReader();
   const chunks: Uint8Array[] = [];
   let received = 0;
-  let streamTimedOut = false;
+  let timedOut = false;
   if (reader) {
     try {
       while (true) {
@@ -500,26 +542,58 @@ export async function callConnection(code: string, opts: CallOptions, signal?: A
         if (!value) continue;
         chunks.push(value);
         received += value.byteLength;
-        if (received >= MAX_BYTES) { await reader.cancel().catch(() => {}); break; }
+        if (received >= RAW_MAX_BYTES) { await reader.cancel().catch(() => {}); break; }
       }
     } catch (e) {
-      if ((e as Error).name === 'TimeoutError' && received > 0) {
-        streamTimedOut = true;
-      } else {
-        throw e;
-      }
+      if ((e as Error).name === 'TimeoutError' && received > 0) timedOut = true;
+      else throw e;
     }
   }
-  const raw = Buffer.concat(chunks.map((c) => Buffer.from(c))).toString('utf-8');
+  const ms = Date.now() - started;
+  lastCalls.set(code, { at: Date.now(), method: p.method, path: p.url.pathname + p.url.search, status: res.status, ms, ok: res.ok });
+  console.log(`[conn] ${p.method} ${code}${p.url.pathname} → ${res.status} ${ms}ms`);
+  return {
+    ok: res.ok,
+    status: res.status,
+    contentType: res.headers.get('content-type') || '',
+    bytes: Buffer.concat(chunks.map((c) => Buffer.from(c))),
+    ms,
+    timedOut,
+  };
+}
+
+export async function callConnection(code: string, opts: CallOptions, signal?: AbortSignal): Promise<CallResult> {
+  const rawRes = await fetchConnectionRaw(code, opts, signal);
+  const raw = Buffer.from(rawRes.bytes).toString('utf-8');
   const truncated = raw.length > MAX_CHARS;
   let text = truncated ? raw.slice(0, MAX_CHARS) + `\n…[响应过长，已截断；完整 ${raw.length} 字符]` : raw;
-  if (streamTimedOut) text += `\n…[流式响应读取超时（${conn.timeoutMs}ms），已返回已收到的 ${received} 字节]`;
-  const ms = Date.now() - started;
-  const ok = res.ok;
+  if (rawRes.timedOut) text += `\n…[流式响应读取超时，已返回已收到的 ${rawRes.bytes.byteLength} 字节]`;
+  return { ok: rawRes.ok, status: rawRes.status, ms: rawRes.ms, text, truncated };
+}
 
-  lastCalls.set(code, { at: Date.now(), method, path: url.pathname + url.search, status: res.status, ms, ok });
-  console.log(`[conn] ${method} ${code}${url.pathname} → ${res.status} ${ms}ms${truncated ? ' (截断)' : ''}`);
-  return { ok, status: res.status, ms, text, truncated };
+/** 业务页面 URL：无 SSO 插件时安全拼接 baseUrl + path；有插件且实现 resolveSsoUrl 时走换票 */
+export async function resolveBusinessPageUrl(
+  code: string,
+  opts: { path?: string; query?: Record<string, string>; title?: string },
+): Promise<{ url: string; partition: string; title?: string }> {
+  const conn = getConnection(code);
+  if (!conn) throw new Error(`没有这个连接：${code}`);
+  const targetPath = opts.path && opts.path !== '/' ? opts.path : '/';
+  const fallback = buildUrl(conn, targetPath, opts.query).toString();
+  const sso = conn.sso ? ssoProviders.get(conn.sso.type) : undefined;
+  if (!sso?.resolveSsoUrl) {
+    return { url: fallback, partition: `persist:conn-${code}`, title: opts.title };
+  }
+  const resolved = await sso.resolveSsoUrl({
+    conn, secret: await getSecret(code), targetPath, query: opts.query,
+  });
+  const url = new URL(resolved.url);
+  if (url.protocol !== 'http:' && url.protocol !== 'https:') throw new Error('SSO 插件返回了非 http(s) 地址');
+  return {
+    url: url.toString(),
+    partition: resolved.partition || `persist:conn-${code}`,
+    title: resolved.title || opts.title,
+  };
 }
 
 function formatSnippet(raw: string, contentType: string | null): string {

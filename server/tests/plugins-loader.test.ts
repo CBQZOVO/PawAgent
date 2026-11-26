@@ -22,6 +22,11 @@ try {
         { id: 'home', label: '测试页', icon: 'briefcase', order: 0, entry: 'ui/index.html' },
         { id: 'escape', label: '越界页', entry: '../../etc/passwd' },
       ],
+      widgets: [
+        { id: 'card', title: '数据卡', entry: 'ui/card.html?script=./dist/w.js', defaultHeight: 300, sameOrigin: true },
+        { id: 'escape', entry: '../../etc/passwd' },
+        { id: 'remote', entry: 'https://example.com/w.html', sameOrigin: true },
+      ],
       routes(router) {
         router.get('/hello', async (c) => {
           const pingRes = await host.tools.execute('alpha_ping', {});
@@ -73,6 +78,14 @@ try {
   assert.equal(report.loaded[0].pages.length, 1, '越界页面入口应被过滤');
   assert.equal(report.loaded[0].pages[0].url, '/api/plugins/demo-alpha/ui/ui/index.html');
   assert.equal(report.loaded[0].pages[0].order, 0);
+  const widgets = report.loaded[0].widgets;
+  assert.equal(widgets.length, 2, '越界部件入口应被过滤');
+  assert.equal(widgets[0].key, 'demo-alpha:card');
+  assert.equal(widgets[0].url, '/api/plugins/demo-alpha/ui/ui/card.html?script=./dist/w.js', 'entry 的 query 要原样保留');
+  assert.equal(widgets[0].defaultHeight, 300);
+  assert.equal(widgets[0].sameOrigin, true);
+  assert.equal(widgets[1].url, 'https://example.com/w.html');
+  assert.equal(widgets[1].sameOrigin, false, '远程部件强制受限沙箱');
   const subRouter = report.routers?.get('demo-alpha');
   assert.ok(subRouter, '应注册插件专属路由');
   const routeRes = await subRouter!.fetch(new Request('http://localhost/hello'));

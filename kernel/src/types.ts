@@ -74,7 +74,26 @@ export type AgentEvent =
       seconds: number; rounds: number; tokens?: { prompt: number; completion: number } }
   | { type: 'open_browser'; url: string; key?: string; partition?: string; title?: string }
   | { type: 'ask'; questions: AskQuestion[] }
-  | { type: 'steer_unconsumed'; ids: string[] };
+  | { type: 'steer_unconsumed'; ids: string[] }
+  | {
+      type: 'widget';
+      id: string;
+      widgetId: string;
+      title?: string;
+      placement?: 'inline' | 'panel';
+      connectionCode?: string;
+      data?: unknown;
+      dataRef?: string;
+      options?: Record<string, unknown>;
+      autoOpen?: boolean;
+    }
+  | {
+      type: 'widget_update';
+      id: string;
+      data?: unknown;
+      options?: Record<string, unknown>;
+      status?: 'streaming' | 'ready';
+    };
 
 export interface StreamDelta {
   reasoning?: string;
@@ -140,7 +159,20 @@ export interface ToolCallBlock {
 export type ContentBlock =
   | { type: 'text'; text: string }
   | ToolCallBlock
-  | { type: 'ask'; questions: AskQuestion[] };
+  | { type: 'ask'; questions: AskQuestion[] }
+  | {
+      type: 'widget';
+      id: string;
+      widgetId: string;
+      title?: string;
+      placement?: 'inline' | 'panel';
+      connectionCode?: string;
+      data?: unknown;
+      dataRef?: string;
+      options?: Record<string, unknown>;
+      state?: unknown;
+      status?: 'streaming' | 'ready';
+    };
 
 export interface ViewMessage {
   id: string;

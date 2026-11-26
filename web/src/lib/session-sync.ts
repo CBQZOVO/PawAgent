@@ -1,9 +1,26 @@
 // 会话合并与流式事件归位的纯函数（便于单测覆盖启动竞态与并行子代理场景）。
-import { toolStepSummary, type AgentEvent, type ContentBlock, type Session, type ViewMessage } from '@paw/shared';
+import { toolStepSummary, type AgentEvent, type ContentBlock, type Session, type ViewMessage, type WidgetBlock } from '@paw/shared';
 
 type ToolBlock = Extract<ContentBlock, { type: 'tool-call' }>;
 
 const isToolBlock = (b: ContentBlock): b is ToolBlock => b.type === 'tool-call';
+const isWidgetBlock = (b: ContentBlock): b is WidgetBlock => b.type === 'widget';
+
+/** widget 事件 → 消息块：App 的 autoOpen 副作用也用同一份构造，避免两处字段漂移 */
+export function widgetBlockFromEvent(ev: Extract<AgentEvent, { type: 'widget' }>): WidgetBlock {
+  return {
+    type: 'widget',
+    id: ev.id,
+    widgetId: ev.widgetId,
+    title: ev.title,
+    placement: ev.placement,
+    connectionCode: ev.connectionCode,
+    data: ev.data,
+    dataRef: ev.dataRef,
+    options: ev.options,
+    status: 'streaming',
+  };
+}
 
 /**
  * tool_done 归位：只更新 ok；普通工具写 output，子代理卡片不写。
@@ -76,6 +93,25 @@ export function applyEventsToMessage(hit: ViewMessage, events: AgentEvent[]): Vi
       m.content.push({ type: 'ask', questions: ev.questions });
       continue;
     }
+    if (ev.type === 'widget') {
+      if (!m.content.some((b) => isWidgetBlock(b) && b.id === ev.id)) {
+        m.content.push(widgetBlockFromEvent(ev));
+      }
+      continue;
+    }
+    if (ev.type === 'widget_update') {
+      const i = m.content.findIndex((b) => isWidgetBlock(b) && b.id === ev.id);
+      if (i >= 0) {
+        const cur = m.content[i] as WidgetBlock;
+        m.content[i] = {
+          ...cur,
+          ...(ev.data !== undefined ? { data: ev.data } : {}),
+          ...(ev.options !== undefined ? { options: ev.options } : {}),
+          ...(ev.status !== undefined ? { status: ev.status } : {}),
+        };
+      }
+      continue;
+    }
     switch (ev.type) {
       case 'reasoning': m.reasoning = (m.reasoning || '') + ev.delta; break;
       case 'text': {
@@ -103,6 +139,10 @@ export function applyEventsToMessage(hit: ViewMessage, events: AgentEvent[]): Vi
         break;
       }
       case 'tool_done': m.content = applyToolDone(m.content, ev); break;
+      case 'done':
+        // 一轮结束仍未显式 ready 的部件一律收尾，卡片不能一直挂「更新中…」
+        m.content = m.content.map((b) => b.type === 'widget' && b.status === 'streaming' ? { ...b, status: 'ready' } : b);
+        break;
       case 'error': m.error = (m.error ? m.error + '\n' : '') + ev.message; break;
       default: break;
     }

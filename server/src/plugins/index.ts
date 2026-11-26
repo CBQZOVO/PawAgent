@@ -4,7 +4,7 @@
 // - 外部插件：启动时通过 loadExternalPlugins() 从 ~/.paw/plugins/（或 PAW_PLUGINS_DIR）动态加载
 import { PluginRegistry, type PawPlugin } from '@paw/kernel';
 import type { Hono } from 'hono';
-import type { ServerPawPlugin, ServerToolExecCtx } from './types.js';
+import type { ResolvedPluginWidget, ServerPawPlugin, ServerToolExecCtx } from './types.js';
 import { workspaceFsPlugin } from './workspace-fs.js';
 import { imagePlugin } from './image.js';
 import { shellPlugin } from './shell.js';
@@ -27,7 +27,9 @@ export type {
   ServerPawPlugin,
   PluginHostApi,
   PluginPageSpec,
+  PluginWidgetSpec,
   ResolvedPluginPage,
+  ResolvedPluginWidget,
   ExternalPluginExport,
 } from './types.js';
 export {
@@ -121,6 +123,11 @@ export async function updateExternalPlugin(dirOrName: string, patch: PluginConfi
   return getPluginInventory();
 }
 
+/** 已启用插件解析后的部件清单（GET /api/widgets 与插件管理页共用） */
+export function getWidgetInventory(): ResolvedPluginWidget[] {
+  return lastExternalReport.loaded.flatMap((p) => p.widgets || []);
+}
+
 export function getPluginInventory() {
   const pages = lastExternalReport.loaded
     .flatMap((p) => p.pages || [])
@@ -137,5 +144,6 @@ export function getPluginInventory() {
     skipped: lastExternalReport.skipped,
     failed: lastExternalReport.failed,
     pages,
+    widgets: getWidgetInventory(),
   };
 }

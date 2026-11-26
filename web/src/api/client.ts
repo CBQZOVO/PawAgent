@@ -432,6 +432,24 @@ export interface PluginPageInfo {
   url: string;
 }
 
+/** 已启用插件解析后的部件清单（GET /api/widgets） */
+export interface WidgetInfo {
+  key: string;
+  pluginDir: string;
+  pluginName: string;
+  id: string;
+  title?: string;
+  description?: string;
+  url: string;
+  placement: 'inline' | 'panel';
+  defaultHeight: number;
+  maxHeight: number;
+  sameOrigin: boolean;
+  defaultConnection?: string;
+  allowedConnections?: 'session' | string[];
+  sso: boolean;
+}
+
 export interface BuiltinPluginInfo {
   name: string;
   version?: string;
@@ -474,6 +492,25 @@ export interface PluginInventory {
   skipped: string[];
   failed: FailedPluginInfo[];
   pages?: PluginPageInfo[];
+  widgets?: WidgetInfo[];
+}
+
+export async function getWidgets(): Promise<WidgetInfo[]> {
+  const res = await fetch('/api/widgets');
+  if (!res.ok) throw new Error(`HTTP ${res.status}`);
+  return ((await res.json()).widgets ?? []) as WidgetInfo[];
+}
+
+/** 解析业务页面 URL：无 SSO 插件时服务端直接拼 baseUrl + path */
+export async function resolveBusinessPage(code: string, opts: {
+  path?: string; query?: Record<string, string>; title?: string;
+}): Promise<{ url: string; partition: string; title?: string }> {
+  const res = await fetch(`/api/connections/${encodeURIComponent(code)}/sso/resolve`, {
+    method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(opts),
+  });
+  const data = await res.json().catch(() => ({}));
+  if (!res.ok) throw new Error(data.error || `HTTP ${res.status}`);
+  return data as { url: string; partition: string; title?: string };
 }
 
 export async function getPlugins(): Promise<PluginInventory> {

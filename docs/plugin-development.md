@@ -414,3 +414,86 @@ host.connections.registerAuthProvider({
 4. **敏感信息不回显**：密钥走 `host.connections.call` 或 `host.config`（存本机 `plugins.json`），不要把 Token、Cookie 或私钥拼进工具返回文本。
 5. **用 `onDispose` 保持热重载干净**：凡是在 `createPlugin` 中注册了 `registerAuthProvider`、`registerSsoProvider` 或定时器，务必在 `hooks.onDispose()` 中对应清理。
 6. **私有插件独立分发**：将企业或个人私有插件放到单独的 Git 仓库中，用户只需 `git clone` 或软链（`ln -s`）到 `~/.paw/plugins/<plugin-dir>` 即可接入 Paw。
+
+---
+
+## 8. 自定义部件（Chat Widgets）
+
+完整架构见 [docs/custom-widgets.md](./custom-widgets.md)。部件是插件 `ui/` 下的**普通静态 HTML 页**，运行在沙箱 iframe 中，不进 Paw 主窗口 JS 上下文；原生 JS / Vue / React / Web Component 都可直接用，没有打包规范。
+
+### 8.1 声明与发射
+
+```js
+export default function createPlugin() {
+  return {
+    name: 'chart-widget',
+    widgets: [
+      { id: 'summary-card', title: '数据概览', entry: 'ui/summary-card.html', placement: 'inline', defaultHeight: 260 },
+    ],
+    tools: [{
+      schema: { name: 'render_summary', description: '渲染数据概览', parameters: { type: 'object', properties: {} } },
+      meta: { readOnly: true },
+      async execute(args, toolCallId, ctx) {
+        ctx.emit?.({
+          type: 'widget', id: `w_${toolCallId}`, widgetId: 'chart-widget:summary-card',
+          title: '数据概览', connectionCode: ctx.connectionCode, data: { items: [] },
+        });
+        return '已渲染数据概览卡片。';
+      },
+    }],
+  };
+}
+```
+
+- `widgetId` 格式为 `<plugin.name>:<widgets[].id>`；清单可通过 `GET /api/widgets` 或 `GET /api/plugins` 的 `widgets` 字段获取。
+- `entry` 支持 `ui/bridge.html?script=./dist/widget.js` 形式的 query，插件管理页静态托管原样透传；`http(s)://` 远程页面也可用，但强制受限沙箱。
+- `placement: 'inline'` 渲染在消息流；`'panel'` 只留摘要卡，配置 `autoOpen: true` 可自动展开右侧面板。`widget_update` 事件按同一 `id` 增量更新 `data` / `options` / `status`。
+- 部件 `data` / `state` **不会进入模型历史**；大模型只看到工具返回的文字摘要。大数据用 `dataRef`，部件挂载后通过 `api_call` 从插件路由按需拉取。
+- `connectionCode` 按「事件显式值 → `ctx.connectionCode` → `defaultConnection`」固化到消息块。部件只能使用该绑定值；插件可用 `allowedConnections: ['crm']` 显式放开白名单。
+
+### 8.2 Bridge 协议（iframe ↔ 宿主）
+
+所有消息为 `{ protocol: 'paw-widget/1', channel: 'paw-widget', from, instanceId: <块 id>, requestId?, type, payload }`；宿主校验 `ev.source`、协议版本、`from === 'widget'` 与 `instanceId`，不匹配直接丢弃。唯一的例外是首条 `ready`：部件此时还不知道 `instanceId`，可以留空，宿主回 `init` 后补上。调用类消息（`api_call` / `connection_call`）必须带 `requestId`，响应信封带回同一个值。单次调用载荷 ≤ 64KB、15 秒超时、每卡片最多 8 个在途调用，超限回显式错误。
+
+| 方向 | type | 说明 |
+| --- | --- | --- |
+| 部件 → 宿主 | `ready` | 就绪后宿主回 `init`（含 data / dataRef / options / state / connectionCode / theme / mode） |
+| 宿主 → 部件 | `update` | `data` / `options` / `theme` / `status` 增量更新 |
+| 部件 → 宿主 | `resize` | `{ height }`，宿主钳制到 `[80, min(maxHeight, 2000)]` |
+| 部件 → 宿主 | `api_call` | `{ method, path, query?, headers?, body? }` + 信封 `requestId` → 宿主代发 `/api/plugin-api/<plugin>/…`，回 `api_result` |
+| 部件 → 宿主 | `connection_call` | 同上 + `responseType?: 'json' \| 'arraybuffer'`，宿主自动拼绑定连接的 `/api/connections/<code>/proxy/…`，回 `connection_result`（base64 for arraybuffer）。path 只接受相对片段，禁止 `..` / scheme / 编码穿越 |
+| 部件 → 宿主 | `open_business_page` | `{ path, query?, title?, mode? }` → 服务端 SSO 换票（无插件时直接拼 baseUrl）后在内置浏览器打开 |
+| 部件 → 宿主 | `send_message` / `save_state` | 把操作转为下一条用户消息 / 持久化交互态（刷新不丢） |
+| 部件 → 宿主 | `open_panel` / `close_panel` | 在消息流与右侧面板之间切换 |
+
+最小部件示例：放进插件 `ui/summary-card.html` 即可，无需构建工具。
+
+```html
+<div id="root">加载中…</div>
+<script>
+  let ID = '';
+  function send(type, payload, requestId) {
+    parent.postMessage({ protocol: 'paw-widget/1', channel: 'paw-widget', from: 'widget', instanceId: ID, requestId, type, payload }, '*');
+  }
+  addEventListener('message', (ev) => {
+    const m = ev.data;
+    if (m?.channel !== 'paw-widget' || m.from !== 'host') return;
+    if (m.type === 'init') {
+      ID = m.instanceId;
+      document.getElementById('root').textContent = JSON.stringify(m.payload.data);
+      send('resize', { height: 220 });
+    } else if (m.type === 'update') {
+      document.getElementById('root').textContent = JSON.stringify(m.payload.data);
+    }
+  });
+  send('ready');
+</script>
+```
+
+### 8.3 可选 SSO 扩展点
+
+`ConnectionSsoProvider` 上新增两个可选钩子，未安装 SSO 插件时全部走默认路径：
+
+- `resolveSsoUrl({ conn, secret, targetPath, query })`：把业务相对路径换成免密 URL，返回 `{ url, partition?, title? }`；未实现时直接安全拼接 `baseUrl + path`。
+- `applySsoAuth(ctx)`：在 `/api/connections/:code/proxy/*` 转发前给请求补 SSO 会话凭据（通用 HTTP 认证仍先执行）。
+

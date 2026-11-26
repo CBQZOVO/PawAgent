@@ -141,7 +141,59 @@ export type AgentEvent =
   // 用户答复作为下一条 user 消息发出，模型接着往下做。
   | { type: 'ask'; questions: AskQuestion[] }
   // 强行提醒未消费回执：本轮提前结束时把未送达模型的 steer id 回传前端，前端回滚进队列不丢消息
-  | { type: 'steer_unconsumed'; ids: string[] };
+  | { type: 'steer_unconsumed'; ids: string[] }
+  // 自定义部件：工具主动发射，前端落到消息块；绝不进模型上下文
+  | {
+      type: 'widget';
+      id: string;
+      widgetId: string;
+      title?: string;
+      placement?: WidgetPlacement;
+      connectionCode?: string;
+      data?: unknown;
+      dataRef?: string;
+      options?: Record<string, unknown>;
+      autoOpen?: boolean;
+    }
+  | {
+      type: 'widget_update';
+      id: string;
+      data?: unknown;
+      options?: Record<string, unknown>;
+      status?: WidgetStatus;
+    };
+
+export type WidgetPlacement = 'inline' | 'panel';
+export type WidgetStatus = 'streaming' | 'ready';
+
+/** 部件 Bridge 协议版本：不匹配的信封直接丢弃，避免新旧部件互相误解 */
+export const WIDGET_BRIDGE_PROTOCOL = 'paw-widget/1' as const;
+
+/** 部件 ↔ 宿主的所有 postMessage 都套这层信封（防串台见 WidgetFrame） */
+export interface WidgetBridgeEnvelope {
+  protocol: typeof WIDGET_BRIDGE_PROTOCOL;
+  channel: 'paw-widget';
+  instanceId: string;
+  /** 只接受 from: 'widget'；防止部件伪造宿主的 init / update 消息 */
+  from: 'widget' | 'host';
+  /** 请求/响应关联 ID；api_call / connection_call 必填 */
+  requestId?: string | number;
+  type: string;
+  payload?: unknown;
+}
+
+export interface WidgetInitPayload {
+  instanceId: string;
+  sessionId?: string;
+  messageId?: string;
+  connectionCode?: string;
+  theme?: string;
+  mode?: WidgetPlacement;
+  data?: unknown;
+  dataRef?: string;
+  options?: Record<string, unknown>;
+  state?: unknown;
+}
 
 /** 上传的文件附件（内容随请求发送，后端拼进 user message） */
 export interface Attachment {
@@ -239,10 +291,27 @@ export interface TodoItem {
  * 一条消息的内容块（text / thinking / tool-call / ask-user 等混排，顺序由数组保证）。
  * 结果直接回填到对应的 tool-call 块上，按 id 配对。
  */
+/** 会话流里的自定义部件实例。data/state 只给 UI，不参与模型历史序列化。 */
+export interface WidgetBlock {
+  type: 'widget';
+  id: string;
+  widgetId: string;
+  title?: string;
+  placement?: WidgetPlacement;
+  connectionCode?: string;
+  data?: unknown;
+  dataRef?: string;
+  options?: Record<string, unknown>;
+  /** 用户在部件内操作后的交互态，刷新后还原 */
+  state?: unknown;
+  status?: WidgetStatus;
+}
+
 export type ContentBlock =
   | { type: 'text'; text: string }
   // answer 有值 = 用户已经答过（卡片转为只读，防止重复提交；刷新后也能还原）
   | { type: 'ask'; questions: AskQuestion[]; answer?: string }
+  | WidgetBlock
   | {
       type: 'tool-call';
       id: string;
@@ -278,7 +347,7 @@ export interface ViewMessage {
 /** 工具调用块（卡片数据全在这，`tools` 数组已并入 content） */
 export type ToolCallBlock = Extract<ContentBlock, { type: 'tool-call' }>;
 
-/** 消息里的纯文本（复制、标题用）：所有 text 块拼起来 */
+/** 消息里的纯文本（复制、标题用）：只拼 text 块。widget 块的 data/state 永不进正文或模型历史。 */
 export function messageText(m: Pick<ViewMessage, 'content'>): string {
   return (m.content || []).filter((b) => b.type === 'text').map((b) => b.text).join('\n\n');
 }
@@ -358,6 +427,7 @@ function compactHistoryToolOutput(t: ToolCallBlock): string {
  *   再接最终回复文本。既保留文件路径/job_id/接口结果等上下文锚点，又给模型提供真实 function-calling 范例，
  *   彻底避免把工具记录拼进 assistant 正文引发的「纯文本编造工具执行」幻觉。
  * - 更早轮次（includeToolCalls=false）：只保留最终回复正文，不拼接 `[本轮工具记录：...]`。
+ * - widget 块由下方各步骤按 type 过滤，不把部件 data/state 塞进模型上下文。
  */
 export function assistantHistoryMessages(
   m: Pick<ViewMessage, 'content' | 'stopped'>,

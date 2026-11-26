@@ -45,9 +45,55 @@ export interface ResolvedPluginPage {
   url: string;
 }
 
+/** 外部插件声明的会话流自定义部件（静态 HTML / 桥接页，运行在沙箱 iframe 中） */
+export interface PluginWidgetSpec {
+  /** 插件内唯一 ID，全局 key 为 `${pluginName}:${id}` */
+  id: string;
+  /** 默认卡片标题 */
+  title?: string;
+  /** 用途描述（管理页展示或注入提示词） */
+  description?: string;
+  /** 相对插件目录的静态入口，可带 ?query；或 https:// 远程地址 */
+  entry: string;
+  /** 默认展示位：消息流内嵌或右侧面板 */
+  placement?: 'inline' | 'panel';
+  /** inline 初始高度，默认 240 */
+  defaultHeight?: number;
+  /** inline 高度上限，默认 800（宿主硬上限 2000） */
+  maxHeight?: number;
+  /** 仅本机插件可开启同源模式；远程 URL 强制忽略 */
+  sameOrigin?: boolean;
+  /** 兜底绑定的系统连接 code */
+  defaultConnection?: string;
+  /** 允许访问的连接范围：默认 session（仅该卡片绑定值），或显式白名单 */
+  allowedConnections?: 'session' | string[];
+  /** 组件本身是远端业务页时，挂载前是否走 SSO 换票 */
+  sso?: boolean;
+}
+
+/** 解析后的部件清单项（透传给前端渲染 WidgetFrame） */
+export interface ResolvedPluginWidget {
+  key: string;
+  pluginDir: string;
+  pluginName: string;
+  id: string;
+  title?: string;
+  description?: string;
+  url: string;
+  placement: 'inline' | 'panel';
+  defaultHeight: number;
+  maxHeight: number;
+  sameOrigin: boolean;
+  defaultConnection?: string;
+  allowedConnections?: 'session' | string[];
+  sso: boolean;
+}
+
 export interface ServerPawPlugin extends PawPlugin<ServerToolExecCtx> {
   /** 可选：注入左侧菜单与自定义页面 */
   pages?: PluginPageSpec[];
+  /** 可选：声明会话流内可渲染的自定义部件 */
+  widgets?: PluginWidgetSpec[];
   /** 可选：注册插件专属 HTTP 路由，统一挂载在 /api/plugin-api/<plugin.name>/* */
   routes?: (router: Hono) => void;
 }

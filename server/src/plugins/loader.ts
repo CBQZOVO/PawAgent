@@ -27,7 +27,9 @@ import type {
   ExternalPluginExport,
   PluginHostApi,
   PluginPageSpec,
+  PluginWidgetSpec,
   ResolvedPluginPage,
+  ResolvedPluginWidget,
   ServerPawPlugin,
   ServerToolExecCtx,
 } from './types.js';
@@ -45,6 +47,7 @@ export interface LoadedExternalPluginInfo {
   entry: string;
   tools: string[];
   pages: ResolvedPluginPage[];
+  widgets: ResolvedPluginWidget[];
   config: Record<string, unknown>;
 }
 
@@ -119,6 +122,74 @@ function resolvePluginPages(
       icon: typeof spec.icon === 'string' && spec.icon.trim() ? spec.icon.trim() : undefined,
       order,
       url,
+    });
+  }
+  return out;
+}
+
+/**
+ * 解析部件清单：与页面不同，entry 允许带 ?query（桥接页据此找脚本），
+ * 所以先把 query 摘出来，只对纯路径部分做越界校验。
+ */
+function resolvePluginWidgets(
+  pluginName: string,
+  pluginDirName: string,
+  pluginDirAbs: string,
+  specs?: PluginWidgetSpec[],
+): ResolvedPluginWidget[] {
+  if (!Array.isArray(specs) || !specs.length) return [];
+  const root = path.resolve(pluginDirAbs);
+  const out: ResolvedPluginWidget[] = [];
+  const seen = new Set<string>();
+  for (const spec of specs) {
+    if (!spec || typeof spec !== 'object') continue;
+    const id = String(spec.id ?? '').trim();
+    const entry = String(spec.entry ?? '').trim();
+    if (!id || !entry || seen.has(id)) continue;
+    seen.add(id);
+
+    const qIdx = entry.indexOf('?');
+    const entryPath = qIdx >= 0 ? entry.slice(0, qIdx) : entry;
+    const query = qIdx >= 0 ? entry.slice(qIdx) : '';
+    let url = '';
+    let remote = false;
+    if (/^https?:\/\//i.test(entryPath)) {
+      url = entryPath + query;
+      remote = true;
+    } else {
+      const resolved = path.resolve(root, entryPath.replace(/^\/+/, ''));
+      if (resolved !== root && !resolved.startsWith(root + path.sep)) {
+        console.warn(`[plugins] 插件 ${pluginName} 的部件入口越界，已忽略：${entry}`);
+        continue;
+      }
+      const rel = path.relative(root, resolved).split(path.sep).map(encodeURIComponent).join('/');
+      url = `/api/plugins/${encodeURIComponent(pluginDirName)}/ui/${rel}${query}`;
+    }
+
+    const clamp = (v: unknown, fallback: number, min: number) =>
+      typeof v === 'number' && Number.isFinite(v) ? Math.min(2000, Math.max(min, Math.floor(v))) : fallback;
+    const defaultHeight = clamp(spec.defaultHeight, 240, 80);
+    const maxHeight = Math.max(defaultHeight, clamp(spec.maxHeight, 800, 80));
+    const allowed = Array.isArray(spec.allowedConnections)
+      ? spec.allowedConnections.filter((v): v is string => typeof v === 'string' && !!v.trim())
+      : undefined;
+    out.push({
+      key: `${pluginName}:${id}`,
+      pluginDir: pluginDirName,
+      pluginName,
+      id,
+      title: typeof spec.title === 'string' && spec.title.trim() ? spec.title.trim() : undefined,
+      description: typeof spec.description === 'string' ? spec.description : undefined,
+      url,
+      placement: spec.placement === 'panel' ? 'panel' : 'inline',
+      defaultHeight,
+      maxHeight,
+      // 远程页面无法获得宿主同源权限，即使插件声明了也强制关掉
+      sameOrigin: !remote && spec.sameOrigin === true,
+      defaultConnection: typeof spec.defaultConnection === 'string' && spec.defaultConnection.trim()
+        ? spec.defaultConnection.trim() : undefined,
+      allowedConnections: allowed?.length ? allowed : undefined,
+      sso: spec.sso === true,
     });
   }
   return out;
@@ -401,6 +472,7 @@ export async function loadExternalPluginsFromDir(
         report.routers!.set(plugin.name, subApp);
       }
       const pages = resolvePluginPages(plugin.name, dirent.name, dir, plugin.pages);
+      const widgets = resolvePluginWidgets(plugin.name, dirent.name, dir, plugin.widgets);
       report.loaded.push({
         name: plugin.name,
         version: plugin.version,
@@ -409,6 +481,7 @@ export async function loadExternalPluginsFromDir(
         entry: resolved.entry,
         tools: (plugin.tools || []).map((t) => t.schema.name),
         pages,
+        widgets,
         config: byNameCfg?.config ?? effectiveConfig,
       });
     } catch (e) {

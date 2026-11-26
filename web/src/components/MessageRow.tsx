@@ -10,6 +10,7 @@ import MessageEditor from './composer/MessageEditor';
 import SourcesBlock from './SourcesBlock';
 import ToolCard from './ToolCard';
 import AskCard from './AskCard';
+import { WidgetCard, type WidgetHostApi } from './WidgetFrame';
 
 /** 纯探查类工具：只读、无副作用，连续多个折成一行（见 items 构造处的说明） */
 const PROBE_TOOLS = new Set(['read_file', 'list_dir', 'search_file', 'search_content', 'git_status', 'git_diff', 'git_log', 'memory_search', 'search_parent_session']);
@@ -42,7 +43,7 @@ function foldLabel(group: ToolCallBlock[]): string {
   }
 }
 
-function MessageRow({ m, fallbackModel, streaming, onOpenSession, onPreviewAttachment, onPreviewFile, onRewind, onRevert, onAnswerAsk }: {  m: ViewMessage;
+function MessageRow({ m, fallbackModel, streaming, onOpenSession, onPreviewAttachment, onPreviewFile, onRewind, onRevert, onAnswerAsk, widgetHost }: {  m: ViewMessage;
   fallbackModel?: string;
   streaming?: boolean;
   onOpenSession?: (id: string) => void;
@@ -56,6 +57,8 @@ function MessageRow({ m, fallbackModel, streaming, onOpenSession, onPreviewAttac
   onRevert?: () => void;
   /** ask_user 卡片提交：答复文本作为下一条用户消息发出去 */
   onAnswerAsk?: (text: string) => void;
+  /** 自定义部件的宿主能力（清单 + 桥接回调） */
+  widgetHost?: WidgetHostApi;
 }) {
   const [showReasoning, setShowReasoning] = useState(false);
   const [showHandoff, setShowHandoff] = useState(false);
@@ -200,10 +203,11 @@ function MessageRow({ m, fallbackModel, streaming, onOpenSession, onPreviewAttac
     if (b.type === 'text' && b.text.trim()) { lastTextIdx = i; break; }
   }
   const headRaw = lastTextIdx > 0 ? blocks.slice(0, lastTextIdx) : [];
-  const turnFold = m.role === 'assistant' && !streaming && headRaw.length > 0;
-  const head = turnFold ? headRaw : [];
-  /** 折叠区之外、按顺序正常渲染的块 */
-  const bodyBlocks = turnFold ? blocks.slice(lastTextIdx) : blocks;
+  // widget 是成果块：即使工具在最后一段正文前发射，回复结束后也必须完整可见
+  const head = headRaw.filter((b) => b.type !== 'widget');
+  const turnFold = m.role === 'assistant' && !streaming && head.length > 0;
+  /** 折叠区之外、按顺序正常渲染的块（部件从折叠区摘出，回到原顺序） */
+  const bodyBlocks = turnFold ? blocks.filter((b, i) => i >= lastTextIdx || b.type === 'widget') : blocks;
   /** 折叠条上的步数：工具调用数（提问卡不算「步」） */
   const headSteps = head.filter((b) => b.type === 'tool-call').length;
 
@@ -324,6 +328,9 @@ function MessageRow({ m, fallbackModel, streaming, onOpenSession, onPreviewAttac
           return <ToolCard key={it.block.id} tool={it.block} members={it.group} busy={streaming} stopped={m.stopped}
             onOpenSession={onOpenSession} onPreviewFile={onPreviewFile} />;
         }
+        if (it.block.type === 'widget') {
+          return widgetHost ? <WidgetCard key={it.block.id} block={it.block} host={widgetHost} messageId={m.id} /> : null;
+        }
         const src = extractSources(it.block.text);
         return (
           <div className="answer" key={`txt-${i}`}>
@@ -372,4 +379,4 @@ function LoadingDots() {
  * 而 m 变了（新消息、内容更新）一定会重新渲染，不会漏更新。
  */
 export default memo(MessageRow, (a, b) =>
-  a.m === b.m && a.streaming === b.streaming && a.fallbackModel === b.fallbackModel);
+  a.m === b.m && a.streaming === b.streaming && a.fallbackModel === b.fallbackModel && a.widgetHost === b.widgetHost);
