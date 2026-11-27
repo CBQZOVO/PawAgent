@@ -11,14 +11,20 @@ import { MAX_ATTACHMENTS } from './attachments';
 const SKIP_DIRS = new Set([
   'node_modules', '.git', 'dist', 'build', '.next', '.nuxt',
   'coverage', '__pycache__', '.venv', 'venv', 'target', '.idea', '.gradle', 'out',
+  '.mvn', '.m2', // Maven：wrapper 配置与本地仓库（repository/ 里动辄上万个 jar）
 ]);
 
 /** 最大递归深度，防止符号链接环或极深目录树无限递归 */
 const MAX_WALK_DEPTH = 10;
 
-function isHidden(name: string): boolean {
-  return name.startsWith('.') || name === 'Thumbs.db' || name === 'desktop.ini';
+/** 点开头的**目录**（.git/.m2/.venv…）一律跳过；**文件**不在此列——.env/.npmrc/.gitignore 恰恰常需要发给 Agent */
+function isHiddenDir(name: string): boolean {
+  return name.startsWith('.');
 }
+
+/** 各系统的垃圾文件，无论在哪一层都不要 */
+const JUNK_FILES = new Set(['.DS_Store', 'Thumbs.db', 'desktop.ini', '.localized']);
+const isJunkFile = (name: string): boolean => JUNK_FILES.has(name);
 
 function fileFromEntry(entry: FileSystemFileEntry): Promise<File | null> {
   return new Promise((resolve) => entry.file((f) => resolve(f), () => resolve(null)));
@@ -31,13 +37,13 @@ function readEntries(reader: FileSystemDirectoryReader): Promise<FileSystemEntry
 async function walkEntry(entry: FileSystemEntry, out: File[], limit: number, depth: number): Promise<void> {
   if (out.length >= limit || depth > MAX_WALK_DEPTH) return;
   if (entry.isFile) {
-    if (isHidden(entry.name)) return;
+    if (isJunkFile(entry.name)) return;
     const file = await fileFromEntry(entry as FileSystemFileEntry);
-    if (file && !isHidden(file.name)) out.push(file);
+    if (file) out.push(file);
     return;
   }
   if (!entry.isDirectory) return;
-  if (depth > 0 && (isHidden(entry.name) || SKIP_DIRS.has(entry.name))) return;
+  if (depth > 0 && (isHiddenDir(entry.name) || SKIP_DIRS.has(entry.name))) return;
   // readEntries 每次最多返回 100 条，必须循环读到空
   const reader = (entry as FileSystemDirectoryEntry).createReader();
   for (;;) {
@@ -46,8 +52,8 @@ async function walkEntry(entry: FileSystemEntry, out: File[], limit: number, dep
     if (!batch.length) break;
     for (const child of batch) {
       if (out.length >= limit) return;
-      if (isHidden(child.name)) continue;
-      if (child.isDirectory && SKIP_DIRS.has(child.name)) continue;
+      if (child.isDirectory && (isHiddenDir(child.name) || SKIP_DIRS.has(child.name))) continue;
+      if (child.isFile && isJunkFile(child.name)) continue;
       await walkEntry(child, out, limit, depth + 1);
     }
   }
@@ -72,7 +78,7 @@ export async function filesFromDataTransfer(dt: DataTransfer, limit = MAX_ATTACH
   if (!hasEntry) {
     // 无 entry（如某些剪贴板/测试来源）：退回普通文件列表，过滤掉文件夹占位（type 为空且 size 为 0）
     return Array.from(dt.files ?? [])
-      .filter((f) => !isHidden(f.name) && (f.type !== '' || f.size > 0))
+      .filter((f) => !isJunkFile(f.name) && (f.type !== '' || f.size > 0))
       .slice(0, maxFiles);
   }
 
@@ -83,7 +89,7 @@ export async function filesFromDataTransfer(dt: DataTransfer, limit = MAX_ATTACH
       await walkEntry(entry, out, maxFiles, 0);
     } else if (rawFile) {
       // 单文件优先用原生 File 对象，确保 Electron webUtils.getPathForFile(file) 能取到本机路径
-      if (!isHidden(rawFile.name)) out.push(rawFile);
+      if (!isJunkFile(rawFile.name)) out.push(rawFile);
     } else if (entry?.isFile) {
       await walkEntry(entry, out, maxFiles, 0);
     }
