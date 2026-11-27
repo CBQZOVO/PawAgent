@@ -173,7 +173,7 @@ export interface PluginWidgetSpec {
 同时在宿主侧落实通用校验：
 - **精确来源校验**：每条 `postMessage` 必须同时满足 `ev.source === iframeRef.current?.contentWindow`、`protocol === 'paw-widget/1'`、`from === 'widget'` 与 `ev.data.instanceId === block.id`，防止多张卡片串台和部件伪造宿主消息。
 - **高度钳制（Clamp）**：`resize` 消息的 `height` 必须限制在 `[80, Math.min(spec.maxHeight ?? 800, 2000)]` 内，防止异常或恶意部件把页面撑爆。
-- **调用预算**：单次调用载荷 ≤ 64KB、15 秒超时、每张卡片最多 8 个在途调用；超限直接回 `ok:false`，组件卸载/刷新时 `AbortSignal` 一并终止在途请求。借鉴自 Mano Bridge 与 dsh 的硬预算思路，但**不采用超时乐观放行**。
+- **调用预算**：单次调用载荷 ≤ 64KB、15 秒超时、每张卡片最多 8 个在途调用；超限直接回 `ok:false`，组件卸载/刷新时 `AbortSignal` 一并终止在途请求，**不采用超时乐观放行**。
 
 ---
 
