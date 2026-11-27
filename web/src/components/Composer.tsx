@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState } from 'react';
 import type { RefObject } from 'react';
-import { ArrowRightLeft, ArrowUp, Check, ChevronDown, Copy, CornerDownRight, FileText, HelpCircle, Image as ImageIcon, Link2, Paperclip, Pencil, Sparkles, Square, Trash2, X } from 'lucide-react';
+import { ArrowRightLeft, ArrowUp, Check, ChevronDown, Copy, CornerDownRight, Folder, HelpCircle, Image as ImageIcon, Link2, Paperclip, Pencil, Sparkles, Square, Trash2, X } from 'lucide-react';
+import FileBadge from './FileBadge';
 import type { Attachment, ContextReading, HandoffContext, ViewMessage } from '@paw/shared';
 import { getSkills, type ModelInfo } from '../api/client';
 import { filesFromDataTransfer, hasDroppedFiles } from '../lib/dnd-files';
@@ -207,7 +208,7 @@ export default function Composer({
                     {item.text && <span className="queue-item-text">{item.text}</span>}
                     {item.attachments.map((a, idx) => (
                       <span className="queue-chip" key={`${item.id}-a-${idx}`}>
-                        {a.kind === 'image' ? <ImageIcon size={11} /> : <FileText size={11} />}
+                        {a.kind === 'image' ? <ImageIcon size={11} /> : a.mime === 'inode/directory' ? <Folder size={11} /> : <FileBadge name={a.name} size={11} />}
                         {a.name}
                       </span>
                     ))}

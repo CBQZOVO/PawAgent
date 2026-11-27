@@ -1,9 +1,9 @@
 import { useEffect, useMemo, useState } from 'react';
-import { Copy, ExternalLink, FileText, RefreshCw, X } from 'lucide-react';
+import { ChevronRight, Copy, ExternalLink, FileText, Folder, RefreshCw, X } from 'lucide-react';
 import { messageTools, type Attachment, type ViewMessage } from '@paw/shared';
-import { getFsFile, getOfficePreview, type FsFile } from '../api/client';
+import { getFsFile, getFsTree, getOfficePreview, type FsEntry, type FsFile } from '../api/client';
 import { inlineMediaSrc } from '../lib/attachments';
-import { extOf, fileBadge, isRawPreviewable, MONACO_LANG } from '../lib/file-preview';
+import { extOf, fileBadgeStyle, isRawPreviewable, MONACO_LANG } from '../lib/file-preview';
 import MarkdownPreview from './MarkdownPreview';
 import CodeEditor from './CodeEditor';
 
@@ -24,13 +24,16 @@ export interface PreviewFile {
   path?: string;
   /** 内联内容（附件）：文本原文 / 图片 data URL / PDF data URL */
   inline?: Attachment;
+  /** 目录预览条目（点击文件夹内子目录打开的 tab） */
+  isDir?: boolean;
   source: 'tool' | 'attachment';
 }
 
-/** CodeBuddy 同款文件类型徽章：彩色圆角方块 + 缩写 */
-function FileBadge({ name }: { name: string }) {
-  const b = fileBadge(extOf(name));
-  return <span className="afp-badge" style={{ backgroundColor: b.color }}>{b.label}</span>;
+/** CodeBuddy 同款文件类型徽章：彩色圆角方块 + 缩写（浅底配深字，size 传了按像素缩放） */
+function FileBadge({ name, size }: { name: string; size?: number }) {
+  const b = fileBadgeStyle(extOf(name));
+  const scaled = size ? { fontSize: Math.round(size * 0.58), minWidth: Math.round(size * 1.7), height: Math.round(size * 1.15) } : undefined;
+  return <span className="afp-badge" style={{ backgroundColor: b.color, color: b.fg, ...scaled }}>{b.label}</span>;
 }
 
 /** 腾讯文档引擎可预览的 Office 扩展（含 PDF；引擎不可用时 PDF 回退浏览器原生 iframe） */
@@ -87,6 +90,52 @@ function OfficePreview({ file }: { file: PreviewFile }) {
     onError={() => setError('预览页面加载失败')} />;
 }
 
+/** 文件夹预览：单层目录列表（复用 /api/fs/tree），点子文件/子文件夹在面板里继续打开 */
+function FolderPreview({ file, onOpenPath }: { file: PreviewFile; onOpenPath: (p: string, dir?: boolean) => void }) {
+  const path = file.path || '';
+  const [entries, setEntries] = useState<FsEntry[] | null>(null);
+  const [error, setError] = useState('');
+
+  // 与 FilePreview 同一套绝对路径拆法：父目录当 root、文件夹名当子路径，必在 root 内
+  const isAbs = path.startsWith('/') || /^[a-zA-Z]:[\\/]/.test(path);
+  const lastSep = Math.max(path.lastIndexOf('/'), path.lastIndexOf('\\'));
+  const fsRoot = isAbs && lastSep >= 0 ? path.slice(0, lastSep || 1) : path;
+  const fsSub = isAbs && lastSep >= 0 ? path.slice(lastSep + 1) || '.' : path;
+
+  useEffect(() => {
+    if (!path) return;
+    let cancelled = false;
+    setEntries(null); setError('');
+    void getFsTree(fsRoot, fsSub).then((d) => {
+      if (cancelled) return;
+      if (d.error) setError(d.error);
+      else setEntries(d.entries);
+    });
+    return () => { cancelled = true; };
+  }, [path, fsRoot, fsSub]);
+
+  if (!path) return <div className="afp-office-fallback"><div className="afp-office-msg">原始文件夹不存在或已被移动</div></div>;
+  if (error) return <div className="afp-office-fallback">
+    <div className="afp-office-msg">文件夹读取失败</div>
+    <div className="afp-office-path">{error}</div>
+    <div className="afp-office-path">{path}</div>
+  </div>;
+  if (!entries) return <div className="afp-office-fallback"><div className="afp-office-msg">正在读取目录…</div></div>;
+  if (!entries.length) return <div className="afp-office-fallback"><div className="afp-office-msg">空文件夹</div></div>;
+  return (
+    <div className="afp-dir-list">
+      {entries.map((e) => (
+        <button key={e.path} className="afp-dir-row" onClick={() => onOpenPath(e.path, e.dir)} title={e.path}>
+          {e.dir ? <Folder size={14} /> : <FileBadge name={e.name} size={13} />}
+          <span className="name">{e.name}</span>
+          <span className="kind">{e.dir ? '文件夹' : '文件'}</span>
+          <ChevronRight size={12} className="arrow" />
+        </button>
+      ))}
+    </div>
+  );
+}
+
 /** 从消息里汇总所有可预览文件（去重，工具文件优先——能读到最新全文） */
 export function collectPreviewFiles(messages: ViewMessage[]): PreviewFile[] {
   const map = new Map<string, PreviewFile>();
@@ -131,18 +180,22 @@ export default function AgentFilePanel({ files, root, editorTheme, onAddToChat, 
   width?: number;
 }) {
   const [openKeys, setOpenKeys] = useState<string[]>([]);
+  /** 从文件夹预览里点开的子文件/子目录（不在消息列表 files 里，单独登记供 tab 与预览查找） */
+  const [extraFiles, setExtraFiles] = useState<PreviewFile[]>([]);
   /** '__newtab__' = WorkBuddy 那种「新标签页」首页；其余是文件 key */
   const [activeKey, setActiveKey] = useState<string | null>('__newtab__');
   const [loadTick, setLoadTick] = useState(0);
   const [diskCache, setDiskCache] = useState<Record<string, FsFile>>({});
   // 点卡片指定的附件优先于同名工具文件：看的就是消息里挂的那一份
   const allFiles = useMemo<PreviewFile[]>(() => {
-    if (!previewRequest) return files;
-    const a = previewRequest.attachment;
-    if (!a) return files; // path 请求：工具文件已在 files 里，无需合并
-    return [{ key: a.name, name: a.name, inline: a, path: a.localPath, source: 'attachment' as const },
-      ...files.filter((f) => f.key !== a.name)];
-  }, [files, previewRequest]);
+    const base = previewRequest?.attachment
+      ? [{ key: previewRequest.attachment.name, name: previewRequest.attachment.name, inline: previewRequest.attachment, path: previewRequest.attachment.localPath, source: 'attachment' as const },
+        ...files.filter((f) => f.key !== previewRequest.attachment!.name)]
+      : files;
+    if (!extraFiles.length) return base;
+    const seen = new Set(base.map((f) => f.key));
+    return [...base, ...extraFiles.filter((f) => !seen.has(f.key))];
+  }, [files, previewRequest, extraFiles]);
 
   // 外部请求打开文件：附件卡片 → 加附件 tab；工具卡片文件名 → 激活同名工具文件 tab
   useEffect(() => {
@@ -151,7 +204,6 @@ export default function AgentFilePanel({ files, root, editorTheme, onAddToChat, 
     if (previewRequest.attachment) {
       const a = previewRequest.attachment;
       key = a.name;
-      const f: PreviewFile = { key, name: a.name, inline: a, path: a.localPath, source: 'attachment' };
       setOpenKeys((prev) => prev.includes(key) ? prev : [...prev, key]);
     } else if (previewRequest.path) {
       const p = previewRequest.path;
@@ -168,12 +220,24 @@ export default function AgentFilePanel({ files, root, editorTheme, onAddToChat, 
     setOpenKeys((prev) => prev.includes(f.key) ? prev : [...prev, f.key]);
     setActiveKey(f.key);
   };
+  /** 点文件夹预览里的子文件/子文件夹：以绝对路径为 key 登记并打开 tab */
+  const openPath = (p: string, dir?: boolean) => {
+    const existing = allFiles.find((f) => f.key === p || f.path === p);
+    if (existing) { openFile(existing); return; }
+    const entry: PreviewFile = {
+      key: p, name: p.split(/[\\/]/).pop() || p, path: p, source: 'tool',
+      ...(dir ? { isDir: true } : {}),
+    };
+    setExtraFiles((prev) => prev.some((f) => f.key === p) ? prev : [...prev, entry]);
+    openFile(entry);
+  };
   const closeFile = (key: string) => {
     setOpenKeys((prev) => {
       const next = prev.filter((k) => k !== key);
       if (activeKey === key) setActiveKey(next[next.length - 1] ?? '__newtab__');
       return next;
     });
+    setExtraFiles((prev) => prev.filter((f) => f.key !== key));
   };
 
   const active = allFiles.find((f) => f.key === activeKey) ?? null;
@@ -190,9 +254,10 @@ export default function AgentFilePanel({ files, root, editorTheme, onAddToChat, 
           const f = allFiles.find((x) => x.key === k);
           if (!f) return null;
           const base = f.name.split(/[\\/]/).pop() || f.name;
+          const isDir = f.isDir || f.inline?.mime === 'inode/directory';
           return (
             <div key={k} className={'afp-tab' + (k === activeKey ? ' active' : '')} onClick={() => setActiveKey(k)} title={f.path || f.name}>
-              <FileBadge name={f.name} />
+              {isDir ? <Folder size={13} /> : <FileBadge name={f.name} />}
               <span className="afp-tab-name">{base}</span>
               <button className="afp-tab-close" onClick={(e) => { e.stopPropagation(); closeFile(k); }} title="关闭"><X size={12} /></button>
             </div>
@@ -211,16 +276,19 @@ export default function AgentFilePanel({ files, root, editorTheme, onAddToChat, 
           ) : (
             <>
               <div className="afp-home-label">本次会话文件 <span className="afp-home-count">{allFiles.length}</span></div>
-              {allFiles.map((f) => (
+              {allFiles.map((f) => {
+                const isDir = f.isDir || f.inline?.mime === 'inode/directory';
+                return (
                 <button key={f.key} className="afp-home-row" onClick={() => openFile(f)} title={f.path || f.name}>
-                  <FileBadge name={f.name} />
+                  {isDir ? <Folder size={13} /> : <FileBadge name={f.name} />}
                   <span className="afp-home-text">
                     <span className="afp-home-name">{f.name.split(/[\\/]/).pop() || f.name}</span>
                     {f.name.includes('/') && <span className="afp-home-path">{f.name}</span>}
                   </span>
                   <span className={'afp-home-src ' + f.source}>{f.source === 'tool' ? 'Agent' : '附件'}</span>
                 </button>
-              ))}
+                );
+              })}
             </>
           )}
         </div>
@@ -230,7 +298,8 @@ export default function AgentFilePanel({ files, root, editorTheme, onAddToChat, 
             cache={diskCache[active.key]} loadTick={loadTick}
             onReload={() => setLoadTick((v) => v + 1)}
             onCache={(d) => setDiskCache((prev) => ({ ...prev, [active.key]: d }))}
-            onAddToChat={onAddToChat} />
+            onAddToChat={onAddToChat}
+            onOpenPath={openPath} />
         </div>
       )}
     </aside>
@@ -238,7 +307,7 @@ export default function AgentFilePanel({ files, root, editorTheme, onAddToChat, 
 }
 
 /** 单个文件预览：工作区文件从磁盘读，内联附件直接用 content */
-function FilePreview({ file, root, editorTheme, cache, loadTick, onReload, onCache, onAddToChat }: {
+function FilePreview({ file, root, editorTheme, cache, loadTick, onReload, onCache, onAddToChat, onOpenPath }: {
   file: PreviewFile;
   root: string;
   editorTheme: 'light' | 'dark';
@@ -247,10 +316,13 @@ function FilePreview({ file, root, editorTheme, cache, loadTick, onReload, onCac
   onReload: () => void;
   onCache: (d: FsFile) => void;
   onAddToChat?: (name: string, start: number | null, end: number | null) => void;
+  onOpenPath: (p: string, dir?: boolean) => void;
 }) {
   const ext = extOf(file.name);
   const raw = isRawPreviewable(ext);
   const isOffice = isOfficeExt(ext);
+  // 文件夹附件（拖入整个文件夹）或目录预览点开的子目录：走目录浏览，不走文件读取
+  const isFolder = !!file.isDir || file.inline?.mime === 'inode/directory';
   const [loading, setLoading] = useState(false);
 
   // 磁盘文件：root 用「文件所在目录」——工具能读绝对路径，但 fs 接口强制 root 隔离；
@@ -263,7 +335,7 @@ function FilePreview({ file, root, editorTheme, cache, loadTick, onReload, onCac
 
   // 工作区文件：从磁盘读全文（第一次 / 手动刷新）
   useEffect(() => {
-    if (!file.path || raw || isOffice) return;
+    if (!file.path || raw || isOffice || isFolder) return;
     let cancelled = false;
     setLoading(true);
     void getFsFile(fsRoot, fsPath).then((d) => {
@@ -271,7 +343,7 @@ function FilePreview({ file, root, editorTheme, cache, loadTick, onReload, onCac
     }).finally(() => { if (!cancelled) setLoading(false); });
     return () => { cancelled = true; };
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [file.key, fsRoot, fsPath, loadTick, raw, isOffice]);
+  }, [file.key, fsRoot, fsPath, loadTick, raw, isOffice, isFolder]);
 
   const content = cache?.content ?? file.inline?.content ?? '';
   const isImage = file.inline?.kind === 'image' || /\.(png|jpe?g|gif|webp|bmp)$/i.test(file.name);
@@ -296,6 +368,8 @@ function FilePreview({ file, root, editorTheme, cache, loadTick, onReload, onCac
   );
 
   if (isImage) return <>{toolbar}<div className="afp-img-wrap"><img src={src} alt={file.name} className="afp-img" /></div></>;
+  // 文件夹：目录浏览（子项点击在面板里继续打开）
+  if (isFolder) return <>{toolbar}<FolderPreview file={file} onOpenPath={onOpenPath} /></>;
   // PDF 与其它 Office 文件统一走腾讯文档引擎；没有本机路径时明确提示不存在。
   if (isOffice) return <>{toolbar}<OfficePreview file={file} /></>;
   if (isMd) return <>{toolbar}<div className="afp-md"><MarkdownPreview content={content} root={root} filePath={file.path || file.name} /></div></>;

@@ -1703,6 +1703,26 @@ body.paw-resizing-v, body.paw-resizing-v * { cursor: row-resize !important; user
 
 /* 正文：GitHub markdown body —— 16px/1.7，标题带下划线，行内 code 灰底 */
 .md-preview { max-width: 980px; margin: 0 auto; padding: 28px 34px 60px; color: var(--gh-fg); font-size: 16px; line-height: 1.7; word-wrap: break-word; }
+/* 大纲布局：正文 + 右侧 sticky 大纲，滚动时跟随 */
+.md-flex { display: flex; align-items: flex-start; gap: 14px; }
+.md-body { flex: 1; min-width: 0; }
+.md-outline {
+  position: sticky; top: 0; flex: 0 0 auto; width: 200px;
+  max-height: calc(100vh - 120px); overflow: auto;
+  padding: 8px 0 8px 14px; border-left: 1px solid var(--gh-border);
+  font-size: 12.5px;
+}
+.md-outline.collapsed { width: auto; padding-left: 10px; }
+.md-outline-head { display: flex; align-items: center; justify-content: space-between; gap: 6px; padding: 0 0 6px; color: var(--gh-fg-muted); font-weight: 600; }
+.md-outline.collapsed .md-outline-head { justify-content: flex-end; }
+.md-outline-head button { display: inline-flex; border: 0; background: none; cursor: pointer; color: var(--gh-fg-muted); padding: 2px; border-radius: 4px; }
+.md-outline-head button:hover { background: var(--soft); color: var(--ink); }
+.md-outline ul { list-style: none; margin: 0; padding: 0; }
+.md-outline li { padding: 3px 6px; border-radius: 6px; cursor: pointer; color: var(--text-secondary); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.md-outline li:hover { background: var(--soft); color: var(--ink); }
+.md-outline li.lv2 { padding-left: 17px; }
+.md-outline li.lv3 { padding-left: 29px; }
+.md-outline li.lv4 { padding-left: 41px; }
 .md-preview > *:first-child { margin-top: 0; }
 .md-preview h1, .md-preview h2, .md-preview h3, .md-preview h4, .md-preview h5, .md-preview h6 { margin: 26px 0 14px; font-weight: 600; line-height: 1.3; }
 .md-preview h1 { font-size: 30px; padding-bottom: 9px; border-bottom: 1px solid var(--gh-border); }
@@ -2181,6 +2201,24 @@ body.paw-resizing-v, body.paw-resizing-v * { cursor: row-resize !important; user
 /* 编辑态里的附件 chip：能看见、能移除 */
 .user-edit-atts { display: flex; flex-wrap: wrap; gap: 6px; padding: 9px 10px 0; }
 .attach-chip-name { max-width: 160px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+/* 文件夹附件预览：单层目录列表，行点击继续打开 */
+.afp-dir-list { flex: 1; min-height: 0; overflow: auto; padding: 8px; display: flex; flex-direction: column; gap: 2px; }
+.afp-dir-row {
+  display: flex; align-items: center; gap: 8px; width: 100%;
+  border: 0; background: none; text-align: left; padding: 6px 8px; border-radius: 7px;
+  cursor: pointer; font: inherit; font-size: 13px; color: var(--text-regular);
+}
+.afp-dir-row:hover { background: var(--soft); }
+.afp-dir-row .name { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.afp-dir-row .kind { font-size: 11px; color: var(--text-placeholder); }
+.afp-dir-row .arrow { color: var(--text-placeholder); }
+/* 文件类型徽章（Seti/Material 配色小方块），聊天 chip 与输入框 token 共用 */
+.file-badge {
+  display: inline-flex; align-items: center; justify-content: center;
+  padding: 0 3px; border-radius: 3px; font-weight: 700; line-height: 1;
+  font-size: 8px; min-width: 20px; height: 15px;
+  letter-spacing: 0; flex: 0 0 auto;
+}
 
 /* ── 侧栏行视觉层级精修：清晰留白 + 精致圆角 + 悬浮白卡选中态 ── */
 .session-item,

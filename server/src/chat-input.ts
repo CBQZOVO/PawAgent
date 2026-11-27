@@ -81,6 +81,11 @@ function rewriteHistoryRefs(messages: ChatMessage[], persisted: Record<string, s
  * 显式引用（name 带目录、行号或占位说明）是用户圈定的小片段，仍按原文注入。
  */
 function fileAttachmentBlock(a: Attachment): string {
+  // 文件夹附件（桌面端拖入整个文件夹）：只给路径，Agent 用 list_dir/read_file 自己浏览
+  if (a.mime === 'inode/directory') {
+    const path = a.localPath ? ` local_path="${a.localPath}"` : '';
+    return `<folder name="${a.name}"${path}>用户拖入整个文件夹作为附件，内容未注入对话。需要了解其中内容时，先用 list_dir 浏览目录结构，再用 read_file 按路径读取需要的文件；不要把整个文件夹的内容全部读进上下文。</folder>`;
+  }
   if (/\.har$/i.test(a.name)) {
     const hint = a.localPath ? `使用 analyze_har 分析本地文件：${a.localPath}` : '请用户提供服务端可读的 HAR 文件路径，再调用 analyze_har。';
     return `<file name="${a.name}" size="${a.size}">正文未注入对话。${hint} 不要读取或转发原始报文。</file>`;

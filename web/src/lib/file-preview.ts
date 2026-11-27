@@ -37,6 +37,16 @@ export function fileBadge(ext: string): { label: string; color: string } {
   return { label: (e.slice(0, 2) || '?').toUpperCase(), color: '#87919e' };
 }
 
+/** 徽章配色 + 前景文字色：浅底配深字，深底配白字（供 chip 缩写徽章复用） */
+export function fileBadgeStyle(ext: string): { label: string; color: string; fg: string } {
+  const b = fileBadge(ext);
+  const r = parseInt(b.color.slice(1, 3), 16);
+  const g = parseInt(b.color.slice(3, 5), 16);
+  const bl = parseInt(b.color.slice(5, 7), 16);
+  const fg = r * 0.299 + g * 0.587 + bl * 0.114 > 160 ? '#1f2328' : '#fff';
+  return { ...b, fg };
+}
+
 /** 扩展名 → Monaco language id（同名的不用列）；跟 IdePanel 保持同一份映射 */
 export const MONACO_LANG: Record<string, string> = {
   js: 'javascript', jsx: 'javascript', mjs: 'javascript', cjs: 'javascript',

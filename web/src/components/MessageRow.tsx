@@ -1,5 +1,6 @@
 import { memo, useEffect, useState } from 'react';
-import { Activity, ArrowRightLeft, Brain, Check, ChevronDown, Copy, CornerUpLeft, FileText, Link2, Pencil, Sparkles } from 'lucide-react';
+import { Activity, ArrowRightLeft, Brain, Check, ChevronDown, Copy, CornerUpLeft, Folder, Link2, Pencil, Sparkles } from 'lucide-react';
+import FileBadge from './FileBadge';
 import { messageText, splitAttachmentPlaceholders, type ContentBlock, type PermissionDecision, type ToolCallBlock, type ViewMessage } from '@paw/shared';
 import { extractSources } from '../lib/search-results';
 import { extractSkillRefs } from '../lib/skill-refs';
@@ -154,7 +155,7 @@ function MessageRow({ m, fallbackModel, streaming, onOpenSession, onPreviewAttac
                 onClick={onPreviewAttachment ? () => onPreviewAttachment(a) : undefined}
                 style={onPreviewAttachment ? { cursor: 'pointer' } : undefined}
                 title={a.kind === 'image' ? undefined : a.name}>
-                {a.kind === 'image' ? <span className="attach-img-icon">▣</span> : <FileText size={12} />}
+                {a.kind === 'image' ? <span className="attach-img-icon">▣</span> : a.mime === 'inode/directory' ? <Folder size={12} /> : <FileBadge name={a.name} size={12} />}
                 <span className="bubble-chip-name">{a.name}</span>
               </span>;
             })}

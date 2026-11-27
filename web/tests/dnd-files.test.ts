@@ -1,5 +1,6 @@
 import assert from 'node:assert/strict';
 import { filesFromDataTransfer, hasDroppedFiles } from '../src/lib/dnd-files.ts';
+import { dirFiles } from '../src/lib/attachments.ts';
 
 function fakeFile(name: string, size = 10, type = 'text/plain'): File {
   return { name, size, type } as unknown as File;
@@ -79,15 +80,34 @@ assert.equal(hasDroppedFiles(null), false);
   assert.deepEqual(limited.map((f) => f.name), ['1.txt', '2.txt']);
 }
 
-// 4. 无 webkitGetAsEntry 时退回 dt.files，过滤目录占位（type==='' && size===0）和隐藏文件
+// 4. 无 entry 的来源（items 为空）退回 dt.files，过滤目录占位（type==='' && size===0）和垃圾文件
+//    点开头的文件（.env/.npmrc）是合法附件，不过滤
 {
   const dt = {
     types: ['Files'],
-    items: [{ kind: 'file', getAsFile: () => fakeFile('ok.txt') }],
+    items: [],
     files: [fakeFile('folder', 0, ''), fakeFile('.env', 20, 'text/plain'), fakeFile('ok.txt', 20, 'text/plain')],
   } as unknown as DataTransfer;
   const out = await filesFromDataTransfer(dt);
-  assert.deepEqual(out.map((f) => f.name), ['ok.txt']);
+  assert.deepEqual(out.map((f) => f.name), ['.env', 'ok.txt']);
+}
+
+// 5. 桌面端（能取本机路径）：文件夹整体作为单个附件，不展开
+{
+  (globalThis as unknown as { window: unknown }).window = {
+    pawDesktop: { getPathForFile: (f: File) => `/tmp/${f.name}` },
+  };
+  const rawFile = fakeFile('project', 0, '');
+  const dt = {
+    types: ['Files'],
+    items: [{ kind: 'file', getAsFile: () => rawFile, webkitGetAsEntry: () => fakeDirEntry('project', [[fakeFileEntry(fakeFile('a.ts'))]]) }],
+    files: [],
+  } as unknown as DataTransfer;
+  const out = await filesFromDataTransfer(dt);
+  assert.equal(out.length, 1, '桌面端文件夹应作为单个附件');
+  assert.equal(out[0], rawFile, '应保留原生 File 实例以便 getPathForFile 取路径');
+  assert.ok(dirFiles.has(out[0]), '应标记为文件夹附件');
+  delete (globalThis as unknown as { window?: unknown }).window;
 }
 
 console.log('✓ dnd-files tests passed');

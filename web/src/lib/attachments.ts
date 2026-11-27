@@ -3,6 +3,9 @@ import type { Attachment } from '@paw/shared';
 
 export const MAX_ATTACHMENTS = 10;
 
+/** 标记来自拖放的「文件夹本体」File：readOne 走文件夹附件分支，不读正文 */
+export const dirFiles = new WeakSet<File>();
+
 export function attachmentKey(name: string, size: number) {
   return JSON.stringify([name, size]);
 }
@@ -58,6 +61,18 @@ function humanSize(bytes: number): string {
 }
 
 async function readOne(f: File): Promise<Attachment> {
+  // 文件夹本体：不读正文，靠本机路径让 Agent 自己浏览（桌面端才有路径）
+  if (dirFiles.has(f)) {
+    const desktop = (window as unknown as {
+      pawDesktop?: { getPathForFile?: (file: File) => string | undefined };
+    }).pawDesktop;
+    const localPath = desktop?.getPathForFile?.(f) ?? (f as File & { path?: string }).path;
+    return {
+      name: f.name, content: `[文件夹附件：${f.name}]`, size: 0,
+      mime: 'inode/directory', kind: 'file' as const,
+      ...(localPath ? { localPath } : {}),
+    };
+  }
   const isSvg = /\.svg$/i.test(f.name) || f.type === 'image/svg+xml';
   const isImage = f.type.startsWith('image/') || /\.(png|jpe?g|gif|webp|bmp|svg)$/i.test(f.name);
   let name = (f as File & { webkitRelativePath?: string }).webkitRelativePath || f.name;
