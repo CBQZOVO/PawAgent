@@ -1,13 +1,22 @@
 import { useEffect, useMemo, useState } from 'react';
 import { Brain, Calendar, Folder, Hash, NotebookPen, Plus, RefreshCw, Search, Trash2, X } from 'lucide-react';
+import CodeEditor from './CodeEditor';
+import MarkdownPreview from './MarkdownPreview';
 
 /**
  * 记忆 · 工作日志 页面：顶部双 tab（外壳仿 TasksPage）。
  * 数据都在 ~/.paw/paw.db，按项目（workspace）区分；API：/api/memories、/api/worklogs。
  */
 
-interface MemoryItem { id: string; title: string; content: string; tags: string; workspace: string; updatedAt: number }
-interface WorkLogItem { id: string; workspace: string; day: string; title: string; content: string; createdAt: number }
+interface MemoryItem {
+  id: string; title: string; content: string; tags: string; workspace: string; updatedAt: number;
+  sourceSessionId?: string | null;
+  sourceTurnId?: string | null;
+}
+interface WorkLogItem {
+  id: string; workspace: string; day: string; title: string; content: string; createdAt: number;
+  sessionId?: string | null;
+}
 
 const projName = (ws: string) => {
   if (!ws) return '通用';
@@ -16,6 +25,11 @@ const projName = (ws: string) => {
 };
 
 const fmtTime = (ts: number) => new Date(ts).toTimeString().slice(0, 5);
+
+const sourceLabel = (m: Pick<MemoryItem, 'sourceSessionId' | 'sourceTurnId'>): string =>
+  m.sourceSessionId
+    ? `来源：会话 ${m.sourceSessionId.slice(0, 8)}${m.sourceTurnId ? ` / 轮次 ${m.sourceTurnId.slice(0, 8)}` : ''}`
+    : '';
 
 const fmtShortDate = (ts: number) => {
   const d = new Date(ts);
@@ -61,7 +75,11 @@ export default function MemoryPage() {
     content: string;
     tags?: string;
     workspace?: string;
+    sourceSessionId?: string | null;
+    sourceTurnId?: string | null;
   } | null>(null);
+  // 撞名时让用户选「覆盖已有」还是「另存为新条」，不自动合并
+  const [conflict, setConflict] = useState<{ existingId: string; existingTitle: string; existingContent: string } | null>(null);
 
   const load = () => {
     setLoading(true);
@@ -79,29 +97,52 @@ export default function MemoryPage() {
   };
   useEffect(() => { load(); }, [wsFilter, days]);
 
-  // Esc 关编辑弹窗
+  // Esc 优先关冲突确认弹窗，再关编辑弹窗，避免把底层编辑态关掉后冲突弹窗悬空
   useEffect(() => {
-    if (!editing) return;
-    const onKey = (e: KeyboardEvent) => { if (e.key === 'Escape') setEditing(null); };
+    if (!editing && !conflict) return;
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key !== 'Escape') return;
+      if (conflict) setConflict(null);
+      else setEditing(null);
+    };
     window.addEventListener('keydown', onKey);
     return () => window.removeEventListener('keydown', onKey);
-  }, [editing]);
+  }, [editing, conflict]);
 
-  const saveEditing = async () => {
+  const saveEditing = async (opts?: { overwriteId?: string; allowDuplicate?: boolean }) => {
     if (!editing) return;
     const body = editing.kind === 'memory'
-      ? { id: editing.id, title: editing.title, content: editing.content, tags: editing.tags, workspace: editing.workspace ?? wsFilter ?? '' }
+      ? {
+        id: opts?.overwriteId ?? editing.id,
+        title: editing.title, content: editing.content, tags: editing.tags,
+        workspace: editing.workspace ?? wsFilter ?? '',
+        allowDuplicate: !!opts?.allowDuplicate,
+      }
       : { id: editing.id, title: editing.title, content: editing.content };
     const res = await fetch(editing.kind === 'memory' ? '/api/memories' : '/api/worklogs', {
       method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body),
     });
+    if (res.status === 409) {
+      const d = await res.json().catch(() => ({}));
+      setConflict(d.conflict ?? null);
+      return;
+    }
     if (!res.ok) {
       const d = await res.json().catch(() => ({}));
       alert(d.error || '保存失败');
       return;
     }
+    setConflict(null);
     setEditing(null);
     load();
+  };
+
+  const resolveConflict = (mode: 'overwrite' | 'duplicate') => {
+    const hit = conflict;
+    setConflict(null);
+    if (!hit) return;
+    if (mode === 'overwrite') void saveEditing({ overwriteId: hit.existingId });
+    else void saveEditing({ allowDuplicate: true });
   };
 
   const remove = async (kind: 'memory' | 'worklog', id: string) => {
@@ -168,7 +209,7 @@ export default function MemoryPage() {
                   <h2 className="mem-heading">{tab === 'memory' ? '长期记忆' : '工作日志'}</h2>
                   <p className="mem-sub">
                     {tab === 'memory'
-                      ? '跨会话沉淀的项目事实、架构决策与用户偏好，按工作区隔离并自动注入上下文索引。'
+                      ? '长期记忆（数据库，按工作区隔离）：跨会话沉淀的项目事实、架构决策与用户偏好，自动注入上下文索引；与人设文件 ~/.paw/persona/MEMORY.md 是两套独立内容。'
                       : '每轮对话结束后自动归纳的工程进展与变更摘要，方便回溯每日工作脉络。'}
                   </p>
                 </div>
@@ -234,6 +275,7 @@ export default function MemoryPage() {
                         className="mem-row"
                         onClick={() => setEditing({
                           kind: 'memory', id: m.id, title: m.title, content: m.content, tags: m.tags, workspace: m.workspace,
+                          sourceSessionId: m.sourceSessionId, sourceTurnId: m.sourceTurnId,
                         })}
                       >
                         <div className="mem-row-top">
@@ -251,6 +293,7 @@ export default function MemoryPage() {
                           </div>
                         </div>
                         <div className="mem-row-content">{m.content}</div>
+                        {sourceLabel(m) && <div className="mem-source">{sourceLabel(m)}</div>}
                         {tags.length > 0 && (
                           <div className="mem-tag-list">
                             {tags.slice(0, 8).map((tag) => (
@@ -294,6 +337,7 @@ export default function MemoryPage() {
                                 <div className="mem-row-title">{l.title}</div>
                                 <div className="mem-row-meta">
                                   {badge(l.workspace)}
+                                  {l.sessionId && <span className="mem-source" title={l.sessionId}>会话 {l.sessionId.slice(0, 8)}</span>}
                                   <button
                                     className="mem-del-btn"
                                     title="删除"
@@ -337,12 +381,32 @@ export default function MemoryPage() {
                 <input className="mem-input" placeholder="简明概括这条记忆或日志" value={editing.title}
                   onChange={(e) => setEditing({ ...editing, title: e.target.value })} />
               </label>
-              <label className="mem-field">
-                <span>内容</span>
-                <textarea className="mem-textarea" placeholder={editing.kind === 'memory' ? '记录具体事实、架构决策、环境约定或踩坑教训…' : '做了什么、结果如何…'}
-                  value={editing.content} rows={8}
-                  onChange={(e) => setEditing({ ...editing, content: e.target.value })} />
-              </label>
+              <div className="mem-field">
+                <span>内容{editing.kind === 'memory' ? '（Markdown：左侧编辑，右侧实时预览）' : ''}</span>
+                {editing.kind === 'memory' ? (
+                  <>
+                    <div className="mem-edit-split">
+                      <CodeEditor
+                        root="" path={`memory:${editing.id ?? 'new'}`} ext="md" language="markdown"
+                        content={editing.content}
+                        theme={localStorage.getItem('paw-editor-theme') === 'dark' ? 'dark' : 'light'}
+                        noSave
+                        onValueChange={(v) => setEditing((prev) => prev ? { ...prev, content: v } : prev)}
+                      />
+                      <div className="mem-edit-preview">
+                        <MarkdownPreview content={editing.content} root="" filePath="memory.md" />
+                      </div>
+                    </div>
+                    {sourceLabel(editing) && (
+                      <div className="mem-source">{sourceLabel(editing)}（由系统记录，不可编辑）</div>
+                    )}
+                  </>
+                ) : (
+                  <textarea className="mem-textarea" placeholder="做了什么、结果如何…"
+                    value={editing.content} rows={8}
+                    onChange={(e) => setEditing({ ...editing, content: e.target.value })} />
+                )}
+              </div>
               {editing.kind === 'memory' && (
                 <div className="mem-field-row">
                   <label className="mem-field">
@@ -363,6 +427,19 @@ export default function MemoryPage() {
                 <button type="button" className="mem-btn-ghost" onClick={() => setEditing(null)}>取消</button>
                 <button type="button" className="mem-btn-primary" disabled={!editing.title.trim() || !editing.content.trim()} onClick={() => void saveEditing()}>保存</button>
               </div>
+            </div>
+          </div>
+        </div>
+      )}
+      {conflict && (
+        <div className="modal-backdrop" onClick={() => setConflict(null)}>
+          <div className="modal confirm-modal" onClick={(e) => e.stopPropagation()}>
+            <h3 className="confirm-title">已存在同名记忆</h3>
+            <p className="confirm-text">「{conflict.existingTitle}」已存在，旧内容：{conflict.existingContent.slice(0, 240)}</p>
+            <div className="confirm-actions">
+              <button type="button" className="btn-ghost" onClick={() => setConflict(null)}>取消</button>
+              <button type="button" className="btn-ghost" onClick={() => resolveConflict('duplicate')}>另存为新条</button>
+              <button type="button" className="btn-solid" onClick={() => resolveConflict('overwrite')}>覆盖已有</button>
             </div>
           </div>
         </div>

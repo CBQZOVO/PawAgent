@@ -19,11 +19,16 @@ db.exec(`
     updated_at INTEGER NOT NULL
   );
 `);
-// 旧库补 workspace 列：存量记忆全归为通用（''），不用迁移数据
+// 旧库补列：workspace 存量记忆归为通用（''）；来源列可空，老记录显示为空
 try {
   const cols = db.prepare('PRAGMA table_info(memories)').all() as { name: string }[];
   if (cols.length && !cols.some((c) => c.name === 'workspace')) {
     db.exec("ALTER TABLE memories ADD COLUMN workspace TEXT NOT NULL DEFAULT ''");
+  }
+  for (const col of ['source_session_id', 'source_turn_id']) {
+    if (cols.length && !cols.some((c) => c.name === col)) {
+      db.exec(`ALTER TABLE memories ADD COLUMN ${col} TEXT`);
+    }
   }
 } catch { /* 新库已带列 */ }
 
@@ -52,7 +57,38 @@ function migrateLegacyMemoriesOnce(): void {
 }
 migrateLegacyMemoriesOnce();
 
-export interface Memory { id: string; title: string; content: string; tags: string; workspace: string; updatedAt: number }
+export interface Memory {
+  id: string;
+  title: string;
+  content: string;
+  tags: string;
+  workspace: string;
+  updatedAt: number;
+  /** 来源由服务端注入，模型不能自填；老记录为空 */
+  sourceSessionId?: string | null;
+  sourceTurnId?: string | null;
+}
+
+export interface MemorySource {
+  sessionId?: string;
+  turnId?: string;
+}
+
+function rowToMemory(r: Record<string, unknown>): Memory {
+  return {
+    id: r.id as string, title: r.title as string, content: r.content as string,
+    tags: (r.tags as string) || '', workspace: (r.workspace as string) || '', updatedAt: r.updated_at as number,
+    sourceSessionId: (r.source_session_id as string) || undefined,
+    sourceTurnId: (r.source_turn_id as string) || undefined,
+  };
+}
+
+/** 按标题 + workspace 查同名记忆（不跨工作区） */
+export function findMemoryByTitle(title: string, workspace?: string | null): Memory | undefined {
+  const row = db.prepare('SELECT * FROM memories WHERE title=? AND workspace=? ORDER BY updated_at DESC LIMIT 1')
+    .get(title.trim(), normWs(workspace)) as Record<string, unknown> | undefined;
+  return row ? rowToMemory(row) : undefined;
+}
 
 export const MEMORY_TOOL_SCHEMAS: ToolSchema[] = [
   {
@@ -104,7 +140,16 @@ function normWs(workspace: string | null | undefined): string {
   return typeof workspace === 'string' ? workspace.trim() : '';
 }
 
-function saveMemory(args: Record<string, unknown>, workspace?: string | null): string {
+/** Agent 工具层只允许修改当前工作区或通用记忆，防止模型跨项目误改 */
+function assertWorkspaceOwnership(id: string, ws: string): void {
+  const row = db.prepare('SELECT workspace FROM memories WHERE id=?').get(id) as { workspace: string } | undefined;
+  if (!row) throw new Error(`没有这条记忆: ${id}（不带 id 则新建）`);
+  if (row.workspace && row.workspace !== ws) {
+    throw new Error(`记忆 ${id} 属于工作区 ${row.workspace}，不能在当前工作区修改或删除`);
+  }
+}
+
+function saveMemory(args: Record<string, unknown>, workspace?: string | null, source?: MemorySource): string {
   const title = String(args.title || '').trim();
   const content = String(args.content || '').trim();
   if (!title || !content) throw new Error('title 和 content 都不能为空');
@@ -113,13 +158,22 @@ function saveMemory(args: Record<string, unknown>, workspace?: string | null): s
   const now = Date.now();
   const id = typeof args.id === 'string' && args.id ? args.id : null;
   if (id) {
-    const r = db.prepare('UPDATE memories SET title=?, content=?, tags=?, updated_at=? WHERE id=?').run(title, content, tags, now, id);
+    assertWorkspaceOwnership(id, ws);
+    const r = db.prepare(`UPDATE memories SET title=?, content=?, tags=?, updated_at=?,
+      source_session_id=COALESCE(?, source_session_id), source_turn_id=COALESCE(?, source_turn_id) WHERE id=?`)
+      .run(title, content, tags, now, source?.sessionId || null, source?.turnId || null, id);
     if (r.changes === 0) throw new Error(`没有这条记忆: ${id}（不带 id 则新建）`);
     return `已更新记忆 ${id}: ${title}`;
   }
+  const existing = findMemoryByTitle(title, ws);
+  if (existing) {
+    if (existing.content === content) return `已存在相同记忆 ${existing.id}: ${title}，无需重复保存`;
+    return `已存在同名记忆 ${existing.id}: ${title}（旧内容：${existing.content.slice(0, 120)}）。若要更新请传 id: "${existing.id}" 重调，或修改标题另建。`;
+  }
   const newId = `mem-${now.toString(36)}-${Math.random().toString(36).slice(2, 6)}`;
-  db.prepare('INSERT INTO memories(id,title,content,tags,workspace,created_at,updated_at) VALUES(?,?,?,?,?,?,?)')
-    .run(newId, title, content, tags, ws, now, now);
+  db.prepare(`INSERT INTO memories(id,title,content,tags,workspace,created_at,updated_at,source_session_id,source_turn_id)
+    VALUES(?,?,?,?,?,?,?,?,?)`)
+    .run(newId, title, content, tags, ws, now, now, source?.sessionId || null, source?.turnId || null);
   return `已记住 ${newId}: ${title}`;
 }
 
@@ -143,16 +197,22 @@ function searchMemories(args: Record<string, unknown>, workspace?: string | null
   return scored.slice(0, limit).map(({ r }) => `[${r.id}] ${r.title}${r.tags ? ` (${r.tags})` : ''}\n${r.content}`).join('\n\n');
 }
 
-function deleteMemory(args: Record<string, unknown>): string {
-  const r = db.prepare('DELETE FROM memories WHERE id=?').run(String(args.id));
-  if (r.changes === 0) throw new Error(`没有这条记忆: ${args.id}`);
-  return `已删除记忆 ${args.id}`;
+function deleteMemory(args: Record<string, unknown>, workspace?: string | null): string {
+  const id = String(args.id || '');
+  assertWorkspaceOwnership(id, normWs(workspace));
+  db.prepare('DELETE FROM memories WHERE id=?').run(id);
+  return `已删除记忆 ${id}`;
 }
 
-export async function executeMemoryTool(name: string, args: Record<string, unknown>, workspace?: string | null): Promise<string> {
-  if (name === 'memory_save') return saveMemory(args, workspace);
+export async function executeMemoryTool(
+  name: string,
+  args: Record<string, unknown>,
+  workspace?: string | null,
+  source?: MemorySource,
+): Promise<string> {
+  if (name === 'memory_save') return saveMemory(args, workspace, source);
   if (name === 'memory_search') return searchMemories(args, workspace);
-  if (name === 'memory_delete') return deleteMemory(args);
+  if (name === 'memory_delete') return deleteMemory(args, workspace);
   throw new Error(`Unknown memory tool: ${name}`);
 }
 
@@ -180,24 +240,35 @@ export function listMemories(workspace?: string | null, limit = 500): Memory[] {
   const rows = (workspace
     ? db.prepare("SELECT * FROM memories WHERE workspace=? OR workspace='' ORDER BY updated_at DESC LIMIT ?").all(workspace, limit)
     : db.prepare('SELECT * FROM memories ORDER BY updated_at DESC LIMIT ?').all(limit)) as Record<string, unknown>[];
-  return rows.map((r) => ({
-    id: r.id as string, title: r.title as string, content: r.content as string,
-    tags: r.tags as string, workspace: (r.workspace as string) || '', updatedAt: r.updated_at as number,
-  }));
+  return rows.map(rowToMemory);
 }
 
-/** 管理页/自动记忆共用的新建+更新。返回 id。 */
-export function upsertMemoryDirect(m: { id?: string; title: string; content: string; tags?: string; workspace?: string | null }): string {
+/** 管理页/自动记忆共用的新建+更新。返回 id。来源由服务端注入，管理页不传则保留原值。 */
+export function upsertMemoryDirect(m: {
+  id?: string;
+  title: string;
+  content: string;
+  tags?: string;
+  workspace?: string | null;
+  sourceSessionId?: string | null;
+  sourceTurnId?: string | null;
+}): string {
   const now = Date.now();
   if (m.id) {
-    const r = db.prepare('UPDATE memories SET title=?, content=?, tags=?, updated_at=? WHERE id=?')
-      .run(m.title, m.content, m.tags || '', now, m.id);
+    const r = db.prepare(`UPDATE memories SET title=?, content=?, tags=?, updated_at=?,
+      workspace=COALESCE(?, workspace),
+      source_session_id=COALESCE(?, source_session_id), source_turn_id=COALESCE(?, source_turn_id) WHERE id=?`)
+      .run(m.title, m.content, m.tags || '', now,
+        m.workspace === undefined ? null : normWs(m.workspace),
+        m.sourceSessionId || null, m.sourceTurnId || null, m.id);
     if (r.changes === 0) throw new Error(`没有这条记忆: ${m.id}`);
     return m.id;
   }
   const id = `mem-${now.toString(36)}-${Math.random().toString(36).slice(2, 6)}`;
-  db.prepare('INSERT INTO memories(id,title,content,tags,workspace,created_at,updated_at) VALUES(?,?,?,?,?,?,?)')
-    .run(id, m.title, m.content, m.tags || '', normWs(m.workspace), now, now);
+  db.prepare(`INSERT INTO memories(id,title,content,tags,workspace,created_at,updated_at,source_session_id,source_turn_id)
+    VALUES(?,?,?,?,?,?,?,?,?)`)
+    .run(id, m.title, m.content, m.tags || '', normWs(m.workspace), now, now,
+      m.sourceSessionId || null, m.sourceTurnId || null);
   return id;
 }
 

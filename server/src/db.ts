@@ -3,7 +3,7 @@
 import { DatabaseSync } from 'node:sqlite';
 import path from 'node:path';
 import { copyFileSync, existsSync, mkdirSync } from 'node:fs';
-import { messageText, normalizeMessage, type ContextCategory, type ContextReading, type Session, type SessionPermission, type ScheduledTask, type SessionSearchResult, type SessionSummary, type TaskRun, type TurnTrace, type ViewMessage } from '@paw/shared';
+import { messageText, normalizeMessage, type ContextCategory, type ContextReading, type Session, type SessionPermission, type ScheduledTask, type SessionSearchResult, type SessionSummary, type SessionUsage, type TaskRun, type TurnTrace, type ViewMessage } from '@paw/shared';
 import { friendlyGatewayError } from './gateway/client.js';
 import { DATA_DIR, LEGACY_DIRS, dataFile } from './paths.js';
 
@@ -300,6 +300,29 @@ export function listTurnTraces(sessionId: string): TurnTrace[] {
     try { out.push(JSON.parse(r.data) as TurnTrace); } catch { /* 跳过损坏记录 */ }
   }
   return out;
+}
+
+/** 聚合每轮实测用量：只认 turn_traces.usage，缺字段的老记录跳过，不混读 context_samples */
+export function getSessionUsage(sessionId: string): SessionUsage {
+  const rows = db.prepare('SELECT data FROM turn_traces WHERE session_id=? ORDER BY at DESC').all(sessionId) as { data: string }[];
+  const total = { prompt: 0, completion: 0, rounds: 0 };
+  const turns: SessionUsage['turns'] = [];
+  for (const r of rows) {
+    let t: TurnTrace;
+    try { t = JSON.parse(r.data) as TurnTrace; } catch { continue; }
+    const prompt = typeof t.usage?.prompt === 'number' && Number.isFinite(t.usage.prompt) ? t.usage.prompt : 0;
+    const completion = typeof t.usage?.completion === 'number' && Number.isFinite(t.usage.completion) ? t.usage.completion : 0;
+    if (!prompt && !completion) continue;
+    const rounds = typeof t.rounds === 'number' && Number.isFinite(t.rounds) ? t.rounds : 0;
+    turns.push({
+      turnId: t.turnId, at: t.at, prompt, completion, rounds,
+      ...(typeof t.model === 'string' && t.model ? { model: t.model } : {}),
+    });
+    total.prompt += prompt;
+    total.completion += completion;
+    total.rounds += rounds;
+  }
+  return { turns: turns.reverse(), total };
 }
 
 export function upsertSession(s: Session): void {

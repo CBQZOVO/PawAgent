@@ -166,12 +166,15 @@ export function useSessions() {
     taskId?: string;
     workspace?: string;
     handoffFrom?: Session['handoffFrom'];
+    /** 初始工具权限（全局许可只在新会话创建时带入） */
+    permission?: SessionPermission;
   }): string => {
     const sid = Math.random().toString(36).slice(2, 10);
     const s: Session = {
       id: sid, title: init.title, messages: [], updatedAt: Date.now(),
       source: init.source, taskId: init.taskId, workspace: init.workspace,
       handoffFrom: init.handoffFrom,
+      ...(init.permission ? { permission: init.permission } : {}),
     };
     createdRef.current.add(sid);
     pushableRef.current.add(sid);

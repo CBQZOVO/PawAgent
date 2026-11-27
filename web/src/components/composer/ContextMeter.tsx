@@ -1,7 +1,7 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
 import { ArrowRightLeft, Minimize2 } from 'lucide-react';
-import { CONTEXT_WINDOW_TOKENS, type ContextCategory, type ContextReading, type ViewMessage } from '@paw/shared';
-import { getContextReading } from '../../api/client';
+import { CONTEXT_WINDOW_TOKENS, type ContextCategory, type ContextReading, type SessionUsage, type ViewMessage } from '@paw/shared';
+import { getContextReading, getUsageApi } from '../../api/client';
 import { toChatMessages } from '../../lib/store';
 import Tips from '../Tips';
 
@@ -31,6 +31,7 @@ function formatTokenCount(n: number): string {
 
 export default function ContextMeter({ sessionId, turn, messages, live, disabled, onCompact, onHandoff }: Props) {
   const [saved, setSaved] = useState<ContextReading | null>();
+  const [usage, setUsage] = useState<SessionUsage | null>(null);
   const [open, setOpen] = useState(false);
   const wrapRef = useRef<HTMLDivElement>(null);
   const turnId = turn?.id;
@@ -43,6 +44,15 @@ export default function ContextMeter({ sessionId, turn, messages, live, disabled
       .catch(() => { if (!ctrl.signal.aborted) setSaved(null); });
     return () => ctrl.abort();
   }, [sessionId, turnId, since, live]);
+
+  useEffect(() => {
+    if (!sessionId) { setUsage(null); return; }
+    const ctrl = new AbortController();
+    void getUsageApi(sessionId, ctrl.signal).then((u) => {
+      if (!ctrl.signal.aborted) setUsage(u);
+    });
+    return () => ctrl.abort();
+  }, [sessionId, turnId, open]);
 
   useEffect(() => {
     if (!open) return;
@@ -146,6 +156,11 @@ export default function ContextMeter({ sessionId, turn, messages, live, disabled
               : reading?.estimated ? '按上一轮请求口径估算 · 下一轮对话生效'
               : reading ? '总量为网关实测，分项按本地估算占比'
               : '按历史正文估算'}
+          </div>
+          <div className="context-usage-total" title="仅统计网关实测并用 done 事件落盘的轮次">
+            本会话累计 token（输入 / 输出）：
+            <strong>{formatTokenCount(usage?.total.prompt ?? 0)} / {formatTokenCount(usage?.total.completion ?? 0)}</strong>
+            <span>· 仅最近 100 轮</span>
           </div>
           {onCompact && (
             <button

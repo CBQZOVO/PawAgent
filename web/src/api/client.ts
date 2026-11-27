@@ -1,5 +1,5 @@
 // SSE 客户端：POST /api/chat → 逐条 yield AgentEvent（类型来自 shared，前后端同一份契约）
-import { normalizeMessage, type AgentEvent, type Attachment, type ChatMessage, type ContextReading, type HandoffContext, type PermissionDecision, type Session, type SessionPermission, type SessionSearchResult, type SessionSummary, type TaskRun, type TurnTrace, type ViewMessage } from '@paw/shared';
+import { normalizeMessage, type AgentEvent, type Attachment, type ChatMessage, type ContextReading, type HandoffContext, type PermissionDecision, type Session, type SessionPermission, type SessionSearchResult, type SessionSummary, type SessionUsage, type TaskRun, type TurnTrace, type ViewMessage } from '@paw/shared';
 
 export interface StreamChatOptions {
   model?: string;
@@ -234,6 +234,23 @@ export async function approvePermissionApi(
   return r.json() as Promise<{ ok: boolean; decision?: PermissionDecision }>;
 }
 
+/** 全局工具许可：只影响之后新建的会话，服务端强过滤 run_command / call_api */
+export async function getGlobalPermissions(): Promise<{ allow: string[] }> {
+  const r = await fetch('/api/permissions/global');
+  const d = await r.json() as { allow?: string[] };
+  return { allow: Array.isArray(d.allow) ? d.allow : [] };
+}
+
+export async function putGlobalPermissions(allow: string[]): Promise<{ ok: boolean; allow: string[] }> {
+  const r = await fetch('/api/permissions/global', {
+    method: 'PUT',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ allow }),
+  });
+  const d = await r.json() as { ok?: boolean; allow?: string[] };
+  return { ok: !!d.ok, allow: Array.isArray(d.allow) ? d.allow : [] };
+}
+
 /** 专用权限更新接口（只改 meta.permission，不碰 messages） */
 export async function updateSessionPermissionApi(
   sessionId: string,
@@ -274,6 +291,20 @@ export async function getTurnTracesApi(sessionId: string, signal?: AbortSignal):
   return Array.isArray(d.traces) ? d.traces : [];
 }
 
+/** 本会话每轮用量（只取最近 100 轮实测轨迹），失败返回空结构 */
+export async function getUsageApi(sessionId: string, signal?: AbortSignal): Promise<SessionUsage> {
+  const empty: SessionUsage = { turns: [], total: { prompt: 0, completion: 0, rounds: 0 } };
+  try {
+    const r = await fetch(`/api/usage/${encodeURIComponent(sessionId)}`, { signal });
+    if (!r.ok) return empty;
+    const d = await r.json() as Partial<SessionUsage>;
+    if (!Array.isArray(d.turns) || !d.total) return empty;
+    return d as SessionUsage;
+  } catch {
+    return empty;
+  }
+}
+
 /** 会话标题：第二次模型调用。失败返回空串，调用方保留字符串兜底标题。 */
 export async function generateTitleApi(text: string, model?: string): Promise<string> {
   try {
@@ -293,6 +324,8 @@ export async function generateTitleApi(text: string, model?: string): Promise<st
 export interface ModelInfo {
   id: string;
   group: string;
+  /** 网关渠道倍率，不是单价；null 表示未设置 */
+  rate?: number | null;
 }
 
 export async function getModels(): Promise<{ models: ModelInfo[]; default?: string | null; error?: string }> {

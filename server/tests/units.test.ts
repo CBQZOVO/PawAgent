@@ -505,6 +505,67 @@ await atest('memory：workspace 维度隔离（项目记忆互不可见）', asy
   await executeTool('memory_delete', { id: idA }, 'w4', {});
 });
 
+await atest('memory：来源由服务端 ctx 注入，同名不同内容不静默新建', async () => {
+  const { listMemories } = await import('../src/tools/memory.js');
+  const ws = '/tmp/paw-test-memory-source';
+  const first = await executeTool('memory_save', { title: '来源治理测试', content: '内容一' }, 'src1', {
+    workspace: ws, sessionId: 'sess-source-1', turnId: 'turn-source-1',
+  });
+  const id = first.content.match(/mem-[\w-]+/)?.[0];
+  assert.ok(id);
+  const item = listMemories(ws).find((m) => m.id === id);
+  assert.equal(item?.sourceSessionId, 'sess-source-1');
+  assert.equal(item?.sourceTurnId, 'turn-source-1');
+
+  const dup = await executeTool('memory_save', { title: '来源治理测试', content: '内容二' }, 'src2', {
+    workspace: ws, sessionId: 'sess-source-1', turnId: 'turn-source-2',
+  });
+  assert.equal(dup.isError, false);
+  assert.match(dup.content, /已存在同名记忆/);
+  assert.ok(dup.content.includes(id));
+  assert.equal(listMemories(ws).filter((m) => m.title === '来源治理测试').length, 1);
+  await executeTool('memory_delete', { id }, 'src3', { workspace: ws });
+});
+
+await atest('memory：Agent 工具禁止跨工作区改删，管理页 upsert 不受限', async () => {
+  const { listMemories, upsertMemoryDirect, deleteMemoryById } = await import('../src/tools/memory.js');
+  const wsA = '/tmp/paw-test-ownA';
+  const wsB = '/tmp/paw-test-ownB';
+  const saved = await executeTool('memory_save', { title: '归属校验测试', content: 'A 项目内容' }, 'own1', { workspace: wsA });
+  const id = saved.content.match(/mem-[\w-]+/)?.[0];
+  assert.ok(id);
+  const badUpdate = await executeTool('memory_save', { id, title: '归属校验测试', content: '篡改' }, 'own2', { workspace: wsB });
+  assert.equal(badUpdate.isError, true);
+  assert.match(badUpdate.content, /不能在当前工作区修改或删除/);
+  const badDelete = await executeTool('memory_delete', { id }, 'own3', { workspace: wsB });
+  assert.equal(badDelete.isError, true);
+  assert.ok(listMemories(wsA).some((m) => m.id === id));
+  // 管理页 API 走 upsertMemoryDirect，可以跨工作区移动
+  upsertMemoryDirect({ id, title: '归属校验测试', content: 'A 项目内容', workspace: wsB });
+  assert.ok(listMemories(wsB).some((m) => m.id === id));
+  deleteMemoryById(id);
+});
+
+await atest('全局许可：过滤 run_command / call_api 与空值', async () => {
+  const { sanitizeGlobalAllow } = await import('../src/agent/permission.js');
+  assert.deepEqual(
+    sanitizeGlobalAllow(['read_file', 'run_command', ' call_api ', '', 'read_file', 42]),
+    ['read_file'],
+  );
+});
+
+await atest('usage：只聚合带 usage 的 turn_traces，并累计总量', async () => {
+  const { getSessionUsage, upsertTurnTrace } = await import('../src/db.js');
+  const sid = 'paw-test-usage-session';
+  const base = { at: 1, totalMs: 10, toolMs: 0, approvalWaitMs: 0, modelMs: 10, rounds: 2, tools: [] };
+  upsertTurnTrace(sid, { ...base, turnId: 'u1', model: 'm1', usage: { prompt: 100, completion: 20 } });
+  upsertTurnTrace(sid, { ...base, turnId: 'u2', model: 'm1', usage: { prompt: 200, completion: 30 }, at: 2 });
+  upsertTurnTrace(sid, { ...base, turnId: 'u3', at: 3 }); // 无 usage：跳过
+  const usage = getSessionUsage(sid);
+  assert.deepEqual(usage.total, { prompt: 300, completion: 50, rounds: 4 });
+  assert.deepEqual(usage.turns.map((t) => t.turnId), ['u1', 'u2']);
+});
+
 await atest('worklog：插入 → 按日/按项目查询 → worklog_search 可读', async () => {
   const { insertWorkLog, listWorkLogs, deleteWorkLog } = await import('../src/tools/worklog.js');
   const id = insertWorkLog({ workspace: '/tmp/paw-test-projA', title: '测试日志条目', content: '工作日志测试内容abc', day: '2026-11-24' });

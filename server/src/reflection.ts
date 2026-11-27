@@ -3,7 +3,7 @@
 // 指令放 user 消息里（网关模型对 system 角色遵循度差，title.ts 2026-11-23 实测结论）。
 import { streamChat, type GatewayConfig } from './gateway/client.js';
 import { isImageModel } from './tools/image-gen.js';
-import { loadMemoryIndex, upsertMemoryDirect } from './tools/memory.js';
+import { findMemoryByTitle, loadMemoryIndex, upsertMemoryDirect } from './tools/memory.js';
 import { insertWorkLog } from './tools/worklog.js';
 
 const PROMPT_TEMPLATE = `下面是一轮人机对话的记录。请判断是否值得写入「长期记忆」和「当日工作日志」，只输出一个 JSON 对象，不要 markdown 代码块、不要解释：
@@ -67,6 +67,7 @@ async function pickCheapestChatModel(cfg: GatewayConfig): Promise<string> {
 export interface TurnRecord {
   workspace: string | null;
   sessionId?: string;
+  turnId?: string;
   userText: string;
   assistantText: string;
   toolNames: string[];
@@ -109,12 +110,20 @@ export async function reflectTurn(cfg: GatewayConfig, turn: TurnRecord): Promise
       });
     }
     if (r.memory && r.memory.title?.trim() && r.memory.content?.trim()) {
-      upsertMemoryDirect({
-        title: r.memory.title.trim(),
-        content: r.memory.content.trim(),
-        tags: (r.memory.tags || '').trim(),
-        workspace: r.memory.scope === 'global' ? '' : turn.workspace,
-      });
+      const title = r.memory.title.trim();
+      const content = r.memory.content.trim();
+      const tags = (r.memory.tags || '').trim();
+      const ws = r.memory.scope === 'global' ? '' : (turn.workspace || '');
+      // 无人值守复盘不阻断：同名同内容跳过，同名不同内容原地更新并刷新来源
+      const existing = findMemoryByTitle(title, ws);
+      if (!existing || existing.content !== content) {
+        upsertMemoryDirect({
+          ...(existing ? { id: existing.id } : {}),
+          title, content, tags, workspace: ws,
+          sourceSessionId: turn.sessionId,
+          sourceTurnId: turn.turnId,
+        });
+      }
     }
   } catch (e) {
     console.warn('[reflect] 本轮复盘失败（不影响对话）:', (e as Error).message);

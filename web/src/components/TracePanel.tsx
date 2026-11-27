@@ -20,10 +20,13 @@ function fmtTokens(n?: number): string {
 export default function TracePanel({
   trace,
   loading,
+  rate,
   onClose,
 }: {
   trace: TurnTrace | null;
   loading?: boolean;
+  /** 网关渠道倍率，非单价；未命中模型列表时为 undefined */
+  rate?: number | null;
   onClose: () => void;
 }) {
   useEffect(() => {
@@ -78,7 +81,7 @@ export default function TracePanel({
                 <strong>{trace.rounds} 轮</strong>
               </div>
               <div className="trace-metric">
-                <small>Token（输入 / 输出）</small>
+                <small>Token（输入 / 输出）{rate != null ? ` · 倍率 ×${rate}` : ''}</small>
                 <strong>
                   {trace.usage ? `${fmtTokens(trace.usage.prompt)} / ${fmtTokens(trace.usage.completion)}` : '—'}
                 </strong>

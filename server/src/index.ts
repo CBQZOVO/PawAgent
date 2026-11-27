@@ -13,19 +13,19 @@ import {
   type BtwRequest, type ChatRequest, type PermissionDecision, type ScheduledTask,
   type Session, type SessionPermission, type SessionSummary, type TurnTrace, type TurnTraceTool,
 } from '@paw/shared';
-import { deleteMemoryById, listMemories, upsertMemoryDirect } from './tools/memory.js';
+import { deleteMemoryById, findMemoryByTitle, listMemories, upsertMemoryDirect } from './tools/memory.js';
 import { deleteWorkLog, listWorkLogs, updateWorkLog } from './tools/worklog.js';
 import { reflectTurn } from './reflection.js';
 import {
   addContextSample, clearSessions, deleteSession, getContextReading, getContextSamples,
-  getSession, listSessionSummaries, listTurnTraces, parseSessionPermission,
+  getSession, getSessionUsage, listSessionSummaries, listTurnTraces, parseSessionPermission,
   searchSessions, updateSessionPermission, upsertSession, upsertSessions, upsertTurnTrace,
 } from './db.js';
 import { isConversationHistory, prepareSessionContext } from './agent/session-context.js';
 import { generateHandoffBrief } from './agent/handoff.js';
 import { loadPersonaPrompt } from './persona.js';
 import { runAgent } from './agent/loop.js';
-import { cancelPendingApprovals, createSessionAuthorizer, detectPermissionConflicts, hasPendingApproval, resolveApproval } from './agent/permission.js';
+import { cancelPendingApprovals, createSessionAuthorizer, detectPermissionConflicts, hasPendingApproval, loadGlobalAllow, resolveApproval, saveGlobalAllow } from './agent/permission.js';
 import type { GatewayConfig } from './gateway/client.js';
 import { loadSkillContent, loadSkills, SKILLS_DIR } from './skills.js';
 import {
@@ -607,6 +607,12 @@ app.post('/api/sessions/import', async (c) => {
   }));
   return c.json({ ok: true, count: imported.length, imported });
 });
+app.get('/api/permissions/global', async (c) => c.json({ allow: await loadGlobalAllow() }));
+app.put('/api/permissions/global', async (c) => {
+  const body = await c.req.json<{ allow?: unknown }>().catch(() => null);
+  const allow = await saveGlobalAllow(body?.allow);
+  return c.json({ ok: true, allow });
+});
 app.patch('/api/sessions/:id/permission', async (c) => {
   const id = c.req.param('id');
   const body = await c.req.json<{ permission?: SessionPermission }>().catch(() => null);
@@ -703,6 +709,9 @@ app.post('/api/sessions/:id/switch', async (c) => {
 });
 app.get('/api/traces/:sessionId', (c) => {
   return c.json({ traces: listTurnTraces(c.req.param('sessionId')) });
+});
+app.get('/api/usage/:sessionId', (c) => {
+  return c.json(getSessionUsage(c.req.param('sessionId')));
 });
 app.get('/api/sessions/:id', (c) => {
   const s = getSession(c.req.param('id'));
@@ -877,10 +886,25 @@ app.post('/api/context/compact', async (c) => {
 // 记忆与工作日志（按项目区分，存 ~/.paw/paw.db）：查看/编辑页面 + 报工数据源
 app.get('/api/memories', (c) => c.json({ items: listMemories(c.req.query('workspace')) }));
 app.put('/api/memories', async (c) => {
-  const b = await c.req.json<{ id?: string; title?: string; content?: string; tags?: string; workspace?: string | null }>();
+  const b = await c.req.json<{
+    id?: string; title?: string; content?: string; tags?: string; workspace?: string | null; allowDuplicate?: boolean;
+  }>().catch(() => null);
+  if (!b || typeof b !== 'object') return c.json({ error: '请求体不是合法 JSON' }, 400);
   const title = b.title?.trim();
   const content = b.content?.trim();
   if (!title || !content) return c.json({ error: 'title 和 content 不能为空' }, 400);
+  if (!b.allowDuplicate) {
+    const scopeWs = b.workspace !== undefined
+      ? b.workspace
+      : (b.id ? listMemories().find((m) => m.id === b.id)?.workspace : undefined);
+    const hit = findMemoryByTitle(title, scopeWs);
+    if (hit && hit.id !== b.id) {
+      return c.json({
+        error: '已存在同名记忆',
+        conflict: { existingId: hit.id, existingTitle: hit.title, existingContent: hit.content },
+      }, 409);
+    }
+  }
   try {
     const id = upsertMemoryDirect({ id: b.id, title, content, tags: b.tags?.trim() || '', workspace: b.workspace });
     return c.json({ ok: true, id });
@@ -1347,7 +1371,7 @@ app.post('/api/chat', (c) => {
         : '';
       if (userText) {
         void reflectTurn(cfg, {
-          workspace, sessionId: body.sessionId,
+          workspace, sessionId: body.sessionId, turnId: body.turnId,
           userText, assistantText: replyText, toolNames,
         });
       }

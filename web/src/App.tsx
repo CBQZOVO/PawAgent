@@ -2,7 +2,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { ArrowDown, ArrowLeft, ArrowRight, ArrowRightLeft, ChevronUp, Eye, Globe, Maximize2, Minimize2, PanelLeftClose, PanelLeftOpen, Sparkles } from 'lucide-react';
 import { messageText, type AgentEvent, type Attachment, type ContextReading, type HandoffContext, type PermissionDecision, type ScheduledTask, type SessionPermission, type TurnTrace, type ViewMessage, type WidgetBlock } from '@paw/shared';
 import {
-  approvePermissionApi, compactContext, createHandoff, exportSessionUrl, generateTitleApi, getModels, getPlugins, getSearchConfig, getSession, getTurnTracesApi, getWorkspace, importSessionsApi, notifyTurnEnd, removeWorkspace as removeWorkspaceApi, resolveBusinessPage, rewindFiles, setSearchConfig, setWorkspace, steerChat, streamBtw, streamChat, updateSessionPermissionApi,
+  approvePermissionApi, compactContext, createHandoff, exportSessionUrl, forkSessionApi, generateTitleApi, getGlobalPermissions, getModels, getPlugins, getSearchConfig, getSession, getTurnTracesApi, getWorkspace, importSessionsApi, notifyTurnEnd, putGlobalPermissions, removeWorkspace as removeWorkspaceApi, resolveBusinessPage, rewindFiles, setSearchConfig, setWorkspace, steerChat, streamBtw, streamChat, updateSessionPermissionApi,
   PLUGINS_CHANGED, WORKSPACE_CHANGED, type ModelInfo, type PluginPageInfo, type SearchProvider, type WidgetInfo,
 } from './api/client';
 import { widgetBlockFromEvent } from './lib/session-sync';
@@ -67,6 +67,10 @@ export default function App() {
   // 输入/状态
   const [input, setInput] = useState('');
   const [error, setError] = useState('');
+  // 全局许可：只作为之后新建会话的初始 allow，不追溯已有会话；ref 供同步的 createSession 读取
+  const [globalAllow, setGlobalAllow] = useState<string[]>([]);
+  const globalAllowRef = useRef<string[]>([]);
+  globalAllowRef.current = globalAllow;
   const pendingCompactions = useRef(new Set<string>());
   const [compactingIds, setCompactingIds] = useState<Set<string>>(new Set());
   const [compactNotice, setCompactNotice] = useState<{ sid: string; text: string } | null>(null);
@@ -190,8 +194,10 @@ export default function App() {
   );
   /** 回退确认框：等用户点「回退」才真删 */
   const [revertAsk, setRevertAsk] = useState<{ sid: string; msgId: string } | null>(null);
+  const [forkAsk, setForkAsk] = useState<{ sid: string; msgId: string } | null>(null);
+  const [globalAllowAsk, setGlobalAllowAsk] = useState<PermissionAskItem | null>(null);
   /** 工具页默认 tab（侧栏入口可指定；页面内切换由子页自己管） */
-  const [toolsTab, setToolsTab] = useState<'mcp' | 'skills' | 'plugins' | 'connections'>('mcp');
+  const [toolsTab, setToolsTab] = useState<'mcp' | 'skills' | 'plugins' | 'connections' | 'permissions'>('mcp');
   const [tasksTab, setTasksTab] = useState<'tasks' | 'runs'>('tasks');
   // Agent / IDE 模式：不记忆，永远从 Agent 开始。
   // 编辑器（IDE）是「手动打开」的动作，不是默认界面 —— 跟 WorkBuddy 一致：
@@ -391,6 +397,9 @@ export default function App() {
   // 启动时拉模型列表 + 搜索配置
   useEffect(() => {
     void refreshModels();
+    void getGlobalPermissions()
+      .then((d) => setGlobalAllow(d.allow))
+      .catch(() => setGlobalAllow([]));
     getSearchConfig()
       .then((c) => { setProvider(c.provider); setHasKey(c.hasDeepseekKey); })
       .catch(() => setHasKey(false));
@@ -543,6 +552,8 @@ export default function App() {
     connectionCode?: string,
     /** 首条消息附带的会话交接单 */
     handoff?: HandoffContext,
+    /** 本轮显式权限（批准计划/新建会话尚未落库时，避免读到过期状态） */
+    permissionOverride?: SessionPermission,
   ) => {
     if (!text && !atts.length && !handoff) return;
     const isExistingSession = !!sid && sessions.some((s) => s.id === sid);
@@ -552,6 +563,8 @@ export default function App() {
 
     let targetId = sid;
     let ws: string | null;
+    // 新会话首轮：全局许可要同时落到本地会话和这一轮请求，避免 800ms 防抖落库前丢失
+    let createdPermission: SessionPermission | undefined;
     // 首条消息才生成标题：后续轮次不改标题，避免每次发消息都白调一次模型
     const existingSession = isExistingSession ? sessions.find((s) => s.id === sid) : undefined;
     const isFirstMessage = !isExistingSession || (existingSession?.messages.length ?? 0) === 0;
@@ -561,7 +574,8 @@ export default function App() {
         const explicit = nextWorkspaceRef.current;
         ws = explicit ? explicit.value : ((await getWorkspace()).root ?? null);
         nextWorkspaceRef.current = null;
-        targetId = createSession({ title: titleFromText(text), source, taskId, workspace: ws || undefined });
+        createdPermission = { mode: 'default', allow: [...globalAllowRef.current], deny: [] };
+        targetId = createSession({ title: titleFromText(text), source, taskId, workspace: ws || undefined, permission: createdPermission });
         dispatchingIdsRef.current.delete('__creating__');
         dispatchingIdsRef.current.add(targetId);
         if (mdl) sessionModelsRef.current.set(targetId, mdl);
@@ -643,7 +657,7 @@ export default function App() {
         workspace: ws, taskRun: runId && taskId ? { taskId, runId } : undefined,
         sessionId: targetId, turnId: userMsg.id,
         handoff, parentSessionId,
-        permission: existingSession?.permission,
+        permission: permissionOverride ?? existingSession?.permission ?? createdPermission,
       })) {
         lastEventAt = Date.now();
         if (ev.type === 'text') textChars += (ev.delta || '').trim().length;
@@ -680,6 +694,26 @@ export default function App() {
         }
         if (ev.type === 'permission_updated') {
           syncSessionPermission(targetId!, ev.permission);
+          continue;
+        }
+        if (ev.type === 'permission_resolved') {
+          flushEvents();
+          const sidForCount = targetId;
+          if (sidForCount) {
+            const count = pendingPermCountRef.current.get(sidForCount) || 0;
+            if (count <= 1) pendingPermCountRef.current.delete(sidForCount);
+            else pendingPermCountRef.current.set(sidForCount, count - 1);
+          }
+          setPermissionAsks((prev) => {
+            const next = new Map(prev);
+            for (const [mid, list] of next) {
+              if (!list.some((a) => a.id === ev.id && a.status === 'pending')) continue;
+              next.set(mid, list.map((a) =>
+                a.id === ev.id && a.status === 'pending' ? { ...a, status: ev.status } : a));
+              break;
+            }
+            return next;
+          });
           continue;
         }
         if ((ev.type === 'done' || ev.type === 'ask') && !sawDone && !sawAsk) {
@@ -902,6 +936,29 @@ export default function App() {
     setTimeout(() => focusRef.current?.focus(), 20);
   };
 
+  /** 非破坏性分叉：原会话不动，新会话截断到选中消息，工作区按基线回退 */
+  const forkSession = async (sid: string, msgId: string) => {
+    const s = sessions.find((x) => x.id === sid);
+    if (!s || runningIds.has(sid)) return;
+    setError('');
+    try {
+      const res = await forkSessionApi(sid, msgId);
+      applyImportedSessions([res.session]);
+      await ensureLoaded(res.session.id);
+      switchSession(res.session.id);
+      setPage('chat');
+      const ws = res.session.workspace ?? null;
+      await setWorkspace(ws);
+      setIdeRoot(ws);
+      const changed = res.restored.length + res.skipped.length;
+      setCompactNotice({ sid: res.session.id, text: changed
+        ? `已创建分叉，工作区回退 ${res.restored.length} 个文件、跳过 ${res.skipped.length} 个手改文件`
+        : '已创建分叉，原会话保持不变' });
+    } catch (e) {
+      setError((e as Error).message || '分叉会话失败');
+    }
+  };
+
   /**
    * ask_user 卡片提交：把答复写回 ask 块（转只读，刷新后保持），再作为下一条用户消息发出。
    * 必须写回 answer —— 否则卡片一直可编辑、并能重复提交，同一问答会被发两遍。
@@ -1032,6 +1089,7 @@ export default function App() {
         title: res.suggestedTitle,
         workspace: ws || undefined,
         handoffFrom: { sessionId: sid, title: session.title },
+        permission: { mode: 'default', allow: [...globalAllowRef.current], deny: [] },
       });
       // 在源会话上写入前向跳转锚点，方便后续来回溯源
       setSessions((prev) => prev.map((s) => s.id === sid ? {
@@ -1141,11 +1199,11 @@ export default function App() {
     }
   };
 
-  const handleToggleStrict = async (sid: string) => {
+  const handleSetPermissionMode = async (sid: string, mode: SessionPermission['mode']) => {
     const s = sessions.find((x) => x.id === sid);
-    if (!s) return;
+    if (!s || s.permission?.mode === mode) return;
     const nextPerm: SessionPermission = {
-      mode: s.permission?.mode === 'strict' ? 'default' : 'strict',
+      mode,
       allow: s.permission?.allow ?? [],
       deny: s.permission?.deny ?? [],
     };
@@ -1164,6 +1222,48 @@ export default function App() {
     } catch (e) {
       setError((e as Error).message || '更新权限失败');
     }
+  };
+
+  /** 批准只读计划：先切回默认权限，再用一句确认让模型接着上一条计划执行，不重复拷贝正文 */
+  const handleApprovePlan = async (sid: string) => {
+    const s = sessions.find((x) => x.id === sid);
+    if (!s || runningIds.has(sid) || s.permission?.mode !== 'plan') return;
+    const nextPerm: SessionPermission = {
+      mode: 'default',
+      allow: s.permission?.allow ?? [],
+      deny: s.permission?.deny ?? [],
+    };
+    try {
+      const r = await updateSessionPermissionApi(sid, nextPerm);
+      if (!r.ok && r.error !== '会话不存在') throw new Error(r.error || '切换模式失败');
+      const applied = r.permission ?? nextPerm;
+      syncSessionPermission(sid, applied);
+      void dispatch('已批准上述计划，请按计划开始执行', model, [], [], sid, undefined, undefined, undefined, undefined, undefined, applied);
+    } catch (e) {
+      setError((e as Error).message || '批准计划失败');
+    }
+  };
+
+  const handleAllowGlobal = async () => {
+    const ask = globalAllowAsk;
+    if (!ask) return;
+    setGlobalAllowAsk(null);
+    setError('');
+    try {
+      const res = await putGlobalPermissions([...new Set([...globalAllowRef.current, ask.tool])]);
+      if (!res.ok) throw new Error('保存全局许可失败');
+      setGlobalAllow(res.allow);
+      // 同步放行当前挂起的审批卡，既立刻唤醒服务端 authorizer，又把该工具加入本会话 allow 并更新卡片状态
+      await handleDecidePermission(ask.id, 'allow_session');
+    } catch (e) {
+      setError((e as Error).message || '设置全局许可失败');
+    }
+  };
+
+  const handleRemoveGlobal = async (tool: string) => {
+    const res = await putGlobalPermissions(globalAllowRef.current.filter((t) => t !== tool));
+    if (res.ok) setGlobalAllow(res.allow);
+    else setError('移除全局许可失败');
   };
 
   const handleDecidePermission = async (askId: string, decision: PermissionDecision) => {
@@ -1485,7 +1585,7 @@ export default function App() {
         onHandoffSession={(id) => void handoff(id)}
         onExportSession={handleExportSession}
         onImportSessions={(file) => void handleImportSessions(file)}
-        onToggleStrict={(id) => void handleToggleStrict(id)}
+        onSetPermissionMode={(id, mode) => void handleSetPermissionMode(id, mode)}
         onProviderToggle={() => setProviderMenu((v) => !v)} onProviderClose={() => setProviderMenu(false)} onProviderSwitch={(p) => void switchProvider(p)}
         onTasks={() => { setTasksTab('tasks'); setPage('tasks'); }}
         onMemory={() => setPage('memory')}
@@ -1509,7 +1609,7 @@ export default function App() {
       />
       <main className="main">
         {page === 'plugin' && activePluginPage ? <PluginPageView page={activePluginPage} /> :
-         page === 'tools' ? <ToolsPage key={toolsTab} initialTab={toolsTab} /> :
+         page === 'tools' ? <ToolsPage key={toolsTab} initialTab={toolsTab} globalAllow={globalAllow} onRemoveGlobal={(tool) => void handleRemoveGlobal(tool)} /> :
          page === 'tasks' ? <TasksPage key={tasksTab} initialTab={tasksTab} onRunInChat={runTaskInChat}
            onOpenSession={(r: TaskRunWithName) => {
              const s = sessions.find((x) => x.runId === r.id);
@@ -1578,6 +1678,12 @@ export default function App() {
           )}
           {(active?.source === 'subagent' || active?.parentId) && (
             <span className="top-badge subagent-badge" title="这是子代理会话，完整过程不会显示在左侧列表">子代理</span>
+          )}
+          {active?.permission?.mode === 'plan' && (
+            <button className="top-badge plan-badge" title="只读计划模式：点击退出并回到默认模式"
+              onClick={() => void handleSetPermissionMode(active.id, 'default')}>
+              <Eye size={12} /> 只读计划
+            </button>
           )}
           {!active && <span className="top-sub">你的本地全能 AI 助手</span>}
           <BackgroundTasks />
@@ -1685,10 +1791,14 @@ export default function App() {
                     }}
                     onRewind={runningIds.has(active.id) ? undefined : (text, atts) => rewindTo(active.id, m.id, text, atts)}
                     onRevert={() => setRevertAsk({ sid: active.id, msgId: m.id })}
+                    onFork={!runningIds.has(active.id) && !active.parentId && active.source !== 'subagent' ? () => setForkAsk({ sid: active.id, msgId: m.id }) : undefined}
                     onAnswerAsk={(text) => void answerAsk(active.id, text)}
                     permissionAsks={permissionAsks.get(m.id)}
                     onDecidePermission={(id, dec) => void handleDecidePermission(id, dec)}
+                    onAllowGlobal={(ask) => setGlobalAllowAsk(ask)}
                     onOpenTrace={turnUserMsg ? () => void handleOpenTrace(active.id, turnUserMsg.id) : undefined}
+                    planApproval={active.permission?.mode === 'plan' && gi === msgTotal - 1 && !runningIds.has(active.id) && !m.error}
+                    onApprovePlan={() => void handleApprovePlan(active.id)}
                     widgetHost={widgetHost} />;
                 })}
                 {active.handoffTo && (
@@ -1806,7 +1916,14 @@ export default function App() {
         )}
       </main>
       {taskPanel && <TaskPanel onClose={() => setTaskPanel(false)} onRunInChat={runTaskInChat} />}
-      {traceView && <TracePanel trace={traceView.trace} loading={traceView.loading} onClose={() => setTraceView(null)} />}
+      {traceView && (
+        <TracePanel
+          trace={traceView.trace}
+          loading={traceView.loading}
+          rate={models.find((m) => m.id === traceView.trace?.model)?.rate}
+          onClose={() => setTraceView(null)}
+        />
+      )}
       {revertAsk && (
         <ConfirmDialog
           title="将对话回退到此消息前？"
@@ -1817,6 +1934,28 @@ export default function App() {
             const ask = revertAsk;
             setRevertAsk(null);
             void revertTo(ask.sid, ask.msgId).catch(() => setError('回退失败，请稍后重试。'));
+          }}
+        />
+      )}
+      {globalAllowAsk && (
+        <ConfirmDialog
+          title="所有新会话都允许这个工具？"
+          body={`「${globalAllowAsk.tool}」将加入全局许可，之后新建的会话默认放行；已有会话不受追溯影响（当前会话会同步放行）。可在「工具 → 全局许可」中移除。`}
+          confirmText="加入全局许可"
+          onCancel={() => setGlobalAllowAsk(null)}
+          onConfirm={() => void handleAllowGlobal()}
+        />
+      )}
+      {forkAsk && (
+        <ConfirmDialog
+          title="从此消息分叉出新会话？"
+          body="原会话的消息不会改变。如果分叉点之后有文件改动，工作区文件会回退到分叉点状态，两个分支共用同一个目录；建议先 git commit 或 git stash 保存当前改动（run_command 产生的文件修改不在快照覆盖内，IDE 手动保存的文件受自改保护不会覆盖）。"
+          confirmText="创建分叉"
+          onCancel={() => setForkAsk(null)}
+          onConfirm={() => {
+            const ask = forkAsk;
+            setForkAsk(null);
+            void forkSession(ask.sid, ask.msgId);
           }}
         />
       )}

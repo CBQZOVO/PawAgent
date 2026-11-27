@@ -167,6 +167,8 @@ export type AgentEvent =
       options: PermissionDecision[];
     }
   | { type: 'permission_updated'; permission: SessionPermission }
+  // 审批不再等待用户：服务端超时或请求中断时同步前端卡片状态
+  | { type: 'permission_resolved'; id: string; status: 'timeout' | 'cancelled' }
   // 子代理：start 建卡片 → event 透传过程（text/tool_start/tool_done）→ done 收尾
   | { type: 'subagent_start'; id: string; toolCallId?: string; name: string; agentName: string; task: string }
   | { type: 'subagent_event'; id: string; event: AgentEvent }
@@ -336,6 +338,22 @@ export interface TurnTrace {
   usage?: { prompt: number; completion: number };
   model?: string;
   tools: TurnTraceTool[];
+}
+
+/** 每轮用量：仅聚合 turn_traces（网关实测），不含上下文窗口快照 */
+export interface SessionUsageTurn {
+  turnId: string;
+  at: number;
+  prompt: number;
+  completion: number;
+  rounds: number;
+  model?: string;
+}
+
+export interface SessionUsage {
+  /** 按时间升序，受 turn_traces 每会话最近 100 轮裁剪限制 */
+  turns: SessionUsageTurn[];
+  total: { prompt: number; completion: number; rounds: number };
 }
 
 /** 会话持久化类型（前后端共用：web localStorage 缓存 + server SQLite） */

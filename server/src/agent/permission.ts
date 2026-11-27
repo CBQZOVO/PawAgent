@@ -2,6 +2,8 @@
 // 基于 @paw/kernel 的一阶谓词规则表（DEFAULT_PERMISSION_RULES）+ 全称谓词 Shell 只读验证器，
 // 支持 default / strict / plan 三种模式及权限配置冲突检查；run_command 保持三重会话放行护栏。
 import { randomUUID } from 'node:crypto';
+import { mkdir, readFile, rename, writeFile } from 'node:fs/promises';
+import path from 'node:path';
 import type { PermissionDecision, SessionPermission } from '@paw/shared';
 import {
   analyzeShellReadOnly,
@@ -19,6 +21,7 @@ import {
 import { pawPlugins } from '../plugins/index.js';
 import { isMcpToolReadOnly } from '../mcp.js';
 import { parseSessionPermission, updateSessionPermission } from '../db.js';
+import { dataFile, LEGACY_DIRS } from '../paths.js';
 
 export {
   analyzeShellReadOnly,
@@ -34,6 +37,49 @@ export {
 const INTERNAL_SAFE_TOOLS = new Set(['todo_write', 'ask_user', 'structured_output', 'subagent']);
 
 export const APPROVAL_TIMEOUT_MS = 300_000;
+
+/** 全局许可只存工具名，且只作为新会话 allow 的默认值；不追溯已有会话 */
+const GLOBAL_PERMISSIONS_FILE = dataFile('permissions.json', LEGACY_DIRS);
+/** 这两个工具无法静态判定副作用，服务端强过滤，不能只靠前端隐藏按钮 */
+const GLOBAL_FORBIDDEN_TOOLS = new Set(['run_command', 'call_api']);
+
+export function sanitizeGlobalAllow(raw: unknown): string[] {
+  if (!Array.isArray(raw)) return [];
+  const out: string[] = [];
+  for (const item of raw) {
+    if (typeof item !== 'string') continue;
+    const name = item.trim();
+    if (!name || GLOBAL_FORBIDDEN_TOOLS.has(name) || out.includes(name)) continue;
+    out.push(name);
+  }
+  return out;
+}
+
+export async function loadGlobalAllow(): Promise<string[]> {
+  try {
+    const d = JSON.parse(await readFile(GLOBAL_PERMISSIONS_FILE, 'utf-8')) as { allow?: unknown };
+    return sanitizeGlobalAllow(d?.allow);
+  } catch {
+    return [];
+  }
+}
+
+let globalPermWriteChain: Promise<void> = Promise.resolve();
+let globalPermSeq = 0;
+
+export async function saveGlobalAllow(raw: unknown): Promise<string[]> {
+  const allow = sanitizeGlobalAllow(raw);
+  const run = async () => {
+    await mkdir(path.dirname(GLOBAL_PERMISSIONS_FILE), { recursive: true });
+    const tmp = `${GLOBAL_PERMISSIONS_FILE}.${process.pid}.${++globalPermSeq}.tmp`;
+    await writeFile(tmp, JSON.stringify({ allow }, null, 2) + '\n', 'utf-8');
+    await rename(tmp, GLOBAL_PERMISSIONS_FILE);
+  };
+  const next = globalPermWriteChain.then(run, run);
+  globalPermWriteChain = next.catch(() => {});
+  await next;
+  return allow;
+}
 
 export function defaultPermission(): SessionPermission {
   return { mode: 'default', allow: [], deny: [] };
@@ -242,6 +288,7 @@ export function createSessionAuthorizer(opts: {
         cur.settled = true;
         clearTimeout(cur.timer);
         pendingApprovals.delete(approvalId);
+        ctx.emit({ type: 'permission_resolved', id: approvalId, status: 'cancelled' });
         finish('deny', '已取消');
       };
       const timer = setTimeout(() => {
@@ -249,6 +296,7 @@ export function createSessionAuthorizer(opts: {
         if (!cur || cur.settled) return;
         cur.settled = true;
         pendingApprovals.delete(approvalId);
+        ctx.emit({ type: 'permission_resolved', id: approvalId, status: 'timeout' });
         finish('deny', '等待确认超时');
       }, timeoutMs);
       timer.unref?.();

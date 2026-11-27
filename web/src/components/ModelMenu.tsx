@@ -58,6 +58,7 @@ export default function ModelMenu({
                     onClick={() => onSelect(m.id)}
                   >
                     <span className="model-item-name"><ModelLogo model={m.id} size={15} /> {m.id}</span>
+                    {m.rate != null && <span title="网关渠道倍率（非单价）" className="model-rate">×{m.rate}</span>}
                     {canSeeImages(m.id) && <span title="支持读图" className="vision-mark"><Eye size={12} /></span>}
                     {m.id === model && <Check size={13} />}
                   </button>

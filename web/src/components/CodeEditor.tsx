@@ -9,13 +9,16 @@ import './../monaco-setup'; // 本地 worker + loader（必须在 Editor 前加�
  * 光标、Cmd+A 只选代码、编辑态、Cmd+S 保存全是 Monaco 自带的，不再自己攒。
  * path 让 Monaco 按文件缓存 model —— 切 tab 保留光标位置和撤销栈。
  */
-export default function CodeEditor({ root, path, ext, content, language, theme, onDirtyChange, onSaved, onAddToChat, readOnly = false }: {
+export default function CodeEditor({ root, path, ext, content, language, theme, onDirtyChange, onSaved, onAddToChat, readOnly = false, onValueChange, noSave = false }: {
   root: string;
   path: string;
   ext: string;
   content: string;
   language: string;
   theme: 'light' | 'dark';
+  onValueChange?: (value: string) => void;
+  /** 受控内容模式：不落盘，编辑内容通过 onValueChange 交还调用方 */
+  noSave?: boolean;
   onDirtyChange?: (dirty: boolean) => void;
   /** 保存成功后回调：刷新标签脏点、更新状态栏 */
   onSaved?: (size: number) => void;
@@ -51,6 +54,7 @@ export default function CodeEditor({ root, path, ext, content, language, theme, 
   const save = useCallback(async () => {
     const ed = editorRef.current;
     if (!ed || saving) return;
+    if (noSave) { onValueChange?.(ed.getValue()); return; }
     const text = ed.getValue();
     setSaving(true);
     setNotice('');
@@ -63,12 +67,12 @@ export default function CodeEditor({ root, path, ext, content, language, theme, 
       setNotice('已保存');
       setTimeout(() => setNotice(''), 1500);
     } finally { setSaving(false); }
-  }, [root, path, saving, onDirtyChange, onSaved]);
+  }, [root, path, saving, onDirtyChange, onSaved, noSave, onValueChange]);
 
   const onMount: OnMount = useCallback((ed, monaco) => {
     editorRef.current = ed;
     // Cmd/Ctrl+S 保存：只读预览不注册（没东西可存）
-    if (!readOnly) {
+    if (!readOnly && !noSave) {
       ed.addCommand(monaco.KeyMod.CtrlCmd | monaco.KeyCode.KeyS, () => { void save(); });
     }
     // 右键「添加到 Paw 对话」（选中代码）：读 Monaco 的选区行号（1-based）
@@ -87,19 +91,20 @@ export default function CodeEditor({ root, path, ext, content, language, theme, 
         },
       });
     }
-    // 编辑模式让编辑器拿焦点（打开文件即可打字）；只读预览不抢焦点
-    if (!readOnly) ed.focus();
-  }, [save, onAddToChat, readOnly]);
+    // 编辑模式让编辑器拿焦点（打开文件即可打字）；只读预览或嵌入弹窗（noSave）不抢焦点
+    if (!readOnly && !noSave) ed.focus();
+  }, [save, onAddToChat, readOnly, noSave]);
 
   const onChange = useCallback((v: string | undefined) => {
     const next = v ?? '';
     setDraft(next);
+    onValueChange?.(next);
     const dirty = next !== content;
     if (dirty !== dirtyRef.current) {
       dirtyRef.current = dirty;
       onDirtyChange?.(dirty);
     }
-  }, [content, onDirtyChange]);
+  }, [content, onDirtyChange, onValueChange]);
 
   return (
     <div className="ide-monaco">

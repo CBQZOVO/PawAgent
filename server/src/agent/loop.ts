@@ -103,6 +103,7 @@ export function createPawToolRuntime(
       depth: ctx.depth,
       allowedTools: ctx.allowedTools,
       sessionId: ctx.sessionId,
+      turnId: ctx.turnId,
       parentSessionId: opts.parentSessionId,
       connectionCode: opts.connectionCode,
       gateway: cfg,

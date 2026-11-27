@@ -58,6 +58,7 @@ export interface ToolContext {
   depth?: number;
   allowedTools?: string[];
   sessionId?: string;
+  turnId?: string;
   parentSessionId?: string;
   connectionCode?: string;
   gateway?: { baseUrl: string; apiKey: string; model: string };
@@ -101,6 +102,7 @@ export async function executeTool(
       depth: ctx.depth ?? 0,
       allowedTools: ctx.allowedTools,
       sessionId: ctx.sessionId,
+      turnId: ctx.turnId,
       parentSessionId: ctx.parentSessionId,
       connectionCode: ctx.connectionCode,
       gateway: ctx.gateway,

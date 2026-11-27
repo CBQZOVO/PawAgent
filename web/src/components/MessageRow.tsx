@@ -1,5 +1,5 @@
 import { memo, useEffect, useState } from 'react';
-import { Activity, ArrowRightLeft, Brain, Check, ChevronDown, Copy, CornerUpLeft, Folder, Link2, Pencil, Sparkles } from 'lucide-react';
+import { Activity, ArrowRightLeft, Brain, Check, ChevronDown, Copy, CornerUpLeft, Folder, Link2, Pencil, Play, Sparkles } from 'lucide-react';
 import FileBadge from './FileBadge';
 import { messageText, splitAttachmentPlaceholders, type ContentBlock, type PermissionDecision, type ToolCallBlock, type ViewMessage } from '@paw/shared';
 import { extractSources } from '../lib/search-results';
@@ -45,7 +45,7 @@ function foldLabel(group: ToolCallBlock[]): string {
   }
 }
 
-function MessageRow({ m, fallbackModel, streaming, onOpenSession, onPreviewAttachment, onPreviewFile, onRewind, onRevert, onAnswerAsk, widgetHost, permissionAsks, onDecidePermission, onOpenTrace }: {  m: ViewMessage;
+function MessageRow({ m, fallbackModel, streaming, onOpenSession, onPreviewAttachment, onPreviewFile, onRewind, onRevert, onFork, onAnswerAsk, widgetHost, permissionAsks, onDecidePermission, onAllowGlobal, onOpenTrace, planApproval, onApprovePlan }: {  m: ViewMessage;
   fallbackModel?: string;
   streaming?: boolean;
   onOpenSession?: (id: string) => void;
@@ -57,6 +57,8 @@ function MessageRow({ m, fallbackModel, streaming, onOpenSession, onPreviewAttac
   onRewind?: (newText: string, attachments: import('@paw/shared').Attachment[]) => Promise<boolean>;
   /** 回退：把对话和产物恢复到这条消息之前（会先弹确认框，由上层弹） */
   onRevert?: () => void;
+  /** 从此消息分叉：保留原会话，工作区回退到分叉点 */
+  onFork?: () => void;
   /** ask_user 卡片提交：答复文本作为下一条用户消息发出去 */
   onAnswerAsk?: (text: string) => void;
   /** 自定义部件的宿主能力（清单 + 桥接回调） */
@@ -64,8 +66,13 @@ function MessageRow({ m, fallbackModel, streaming, onOpenSession, onPreviewAttac
   /** 本条助手消息关联的严格模式权限确认卡 */
   permissionAsks?: PermissionAskItem[];
   onDecidePermission?: (id: string, decision: PermissionDecision) => void;
+  /** 把工具加入全局许可（只影响之后新建的会话） */
+  onAllowGlobal?: (ask: PermissionAskItem) => void;
   /** 点击耗时徽标打开本轮执行轨迹 */
   onOpenTrace?: () => void;
+  /** 只读计划模式下，最后一条已完成的助手消息可批准计划并开始执行 */
+  planApproval?: boolean;
+  onApprovePlan?: () => void;
 }) {
   const [showReasoning, setShowReasoning] = useState(false);
   const [showHandoff, setShowHandoff] = useState(false);
@@ -184,6 +191,11 @@ function MessageRow({ m, fallbackModel, streaming, onOpenSession, onPreviewAttac
             {onRevert && (
               <button className="user-act" onClick={onRevert} title="将对话及产物回退到此消息前">
                 <CornerUpLeft size={12} />
+              </button>
+            )}
+            {onFork && (
+              <button className="user-act" onClick={onFork} title="从此消息分叉出新会话（原会话保留）">
+                <ArrowRightLeft size={12} />
               </button>
             )}
             {onRewind && (
@@ -349,7 +361,7 @@ function MessageRow({ m, fallbackModel, streaming, onOpenSession, onPreviewAttac
       {permissionAsks && permissionAsks.length > 0 && onDecidePermission && (
         <div className="perm-list">
           {permissionAsks.map((ask) => (
-            <PermissionCard key={ask.id} ask={ask} onDecide={onDecidePermission} />
+            <PermissionCard key={ask.id} ask={ask} onDecide={onDecidePermission} onAllowGlobal={onAllowGlobal} />
           ))}
         </div>
       )}
@@ -357,6 +369,12 @@ function MessageRow({ m, fallbackModel, streaming, onOpenSession, onPreviewAttac
       {blocks.length > 0 ? (
         // 底部工具条：生成中标识 + 耗时轨迹入口 + 复制 + 模型名（跟着最后一块走，不跟着正文走）
         <div className="msg-actions">
+          {planApproval && !streaming && !m.stopped && !!messageText(m).trim() && onApprovePlan && (
+            <button type="button" className="plan-approve-btn" onClick={onApprovePlan}
+              title="退出只读计划模式，按上面的计划开始执行">
+              <Play size={12} /> 批准计划并开始执行
+            </button>
+          )}
           {streaming && <span className="generating-hint"><LoadingDots /> 生成中… {fmtDuration(now - m.ts)}</span>}
           {m.stopped && <span className="generating-hint stopped-hint">已停止{m.durationMs ? ` · ${fmtDuration(m.durationMs)}` : ''}</span>}
           {!streaming && !m.stopped && m.durationMs && !turnFold ? (
@@ -372,6 +390,11 @@ function MessageRow({ m, fallbackModel, streaming, onOpenSession, onPreviewAttac
               <Activity size={12} /> 轨迹
             </button>
           ) : null}
+          {!streaming && onFork && (
+            <button className="action-btn" onClick={onFork} title="从此消息分叉出新会话（原会话保留）">
+              <ArrowRightLeft size={13} />
+            </button>
+          )}
           <button className="action-btn" onClick={copy} title={copied ? '已复制' : '复制'}>
             {copied ? <Check size={13} /> : <Copy size={13} />}
           </button>
@@ -407,4 +430,7 @@ export default memo(MessageRow, (a, b) =>
   && a.streaming === b.streaming
   && a.fallbackModel === b.fallbackModel
   && a.widgetHost === b.widgetHost
-  && a.permissionAsks === b.permissionAsks);
+  && a.permissionAsks === b.permissionAsks
+  && a.planApproval === b.planApproval
+  && Boolean(a.onFork) === Boolean(b.onFork)
+  && Boolean(a.onRewind) === Boolean(b.onRewind));

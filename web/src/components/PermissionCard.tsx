@@ -10,7 +10,7 @@ export interface PermissionAskItem {
   title: string;
   detail: string;
   options: PermissionDecision[];
-  status: 'pending' | 'allowed' | 'denied' | 'cancelled';
+  status: 'pending' | 'allowed' | 'denied' | 'cancelled' | 'timeout';
   decision?: PermissionDecision;
 }
 
@@ -25,15 +25,18 @@ const STATUS_TEXT: Record<Exclude<PermissionAskItem['status'], 'pending'>, strin
   allowed: '已放行',
   denied: '已拒绝',
   cancelled: '已取消',
+  timeout: '已超时，按拒绝处理',
 };
 
 /** 严格确认模式内联卡片：非模态展示，方便滚动核对上下文后再放行或拒绝 */
 export default function PermissionCard({
   ask,
   onDecide,
+  onAllowGlobal,
 }: {
   ask: PermissionAskItem;
   onDecide: (id: string, decision: PermissionDecision) => void;
+  onAllowGlobal?: (ask: PermissionAskItem) => void;
 }) {
   const pending = ask.status === 'pending';
   return (
@@ -63,8 +66,17 @@ export default function PermissionCard({
               {DECISION_LABELS[opt].label}
             </button>
           ))}
-        </div>
-      )}
+          {onAllowGlobal && ask.tool !== 'run_command' && ask.tool !== 'call_api' && (
+            <button
+              type="button"
+              className="perm-btn global"
+              onClick={() => onAllowGlobal(ask)}
+            >
+              所有新会话允许
+            </button>
+          )}
+          </div>
+        )}
     </div>
   );
 }

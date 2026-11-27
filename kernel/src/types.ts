@@ -100,6 +100,7 @@ export type AgentEvent =
       options: PermissionDecision[];
     }
   | { type: 'permission_updated'; permission: SessionPermission }
+  | { type: 'permission_resolved'; id: string; status: 'timeout' | 'cancelled' }
   | { type: 'subagent_start'; id: string; toolCallId?: string; name: string; agentName: string; task: string }
   | { type: 'subagent_event'; id: string; event: AgentEvent }
   | { type: 'subagent_done'; id: string; status: SubagentStatus; summary: string;
@@ -235,6 +236,7 @@ export interface ToolExecutionContext {
   depth: number;
   allowedTools?: string[];
   sessionId?: string;
+  turnId?: string;
   unattended?: boolean;
   emit: (ev: AgentEvent) => void;
   parentMessages?: ChatMessage[];

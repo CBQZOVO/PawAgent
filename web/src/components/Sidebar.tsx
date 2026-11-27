@@ -1,12 +1,12 @@
 import { useEffect, useMemo, useRef, useState, type MouseEvent as ReactMouseEvent, type ReactNode } from 'react';
 import { createPortal } from 'react-dom';
 import {
-  ArrowRightLeft, BarChart3, Box, Brain, Briefcase, ChevronDown, Clock, Compass,
-  Download, FileText, Folder, Globe, GripVertical, LayoutGrid, Link2, MessageSquare,
+  ArrowRightLeft, BarChart3, Box, Brain, Briefcase, Check, ChevronDown, Clock, Compass,
+  Download, Eye, FileText, Folder, Globe, GripVertical, LayoutGrid, Link2, MessageSquare,
   MessageSquarePlus, MoreHorizontal, PanelLeftClose, PanelLeftOpen, Plug, Plus,
   Search, Shield, Sparkles, Trash2, Upload, X,
 } from 'lucide-react';
-import type { Session, SessionSearchResult } from '@paw/shared';
+import type { Session, SessionPermission, SessionSearchResult } from '@paw/shared';
 import { getWorkspace, searchSessionsApi, setWorkspace, WORKSPACE_CHANGED, type PluginPageInfo, type SearchProvider, type WorkspaceInfo } from '../api/client';
 import ProviderMenu from './ProviderMenu';
 import WorkspacePicker from './WorkspacePicker';
@@ -50,7 +50,7 @@ function renderPluginIcon(icon?: string): ReactNode {
 const RECENT_PREVIEW_COUNT = 5;
 export default function Sidebar({
   sessions, activeId, provider, hasKey, providerMenu,
-  onNew, onSelect, onDelete, onHandoffSession, onExportSession, onImportSessions, onToggleStrict,
+  onNew, onSelect, onDelete, onHandoffSession, onExportSession, onImportSessions, onSetPermissionMode,
   onProviderToggle, onProviderClose, onProviderSwitch, onTasks, onMemory, onRemoveWorkspace, onNewInWorkspace, page, onPage,
   collapsed, onToggleCollapse, ideMode, runningIds, toolsTab,
   pluginPages = [], activePluginPageKey = null, onOpenPluginPage,
@@ -68,7 +68,7 @@ export default function Sidebar({
   onHandoffSession?: (id: string) => void;
   onExportSession?: (id: string) => void;
   onImportSessions?: (file: File) => void;
-  onToggleStrict?: (id: string) => void;
+  onSetPermissionMode?: (id: string, mode: SessionPermission['mode']) => void;
   onRemoveWorkspace: (root: string) => void;
   onProviderToggle: () => void;
   onProviderClose: () => void;
@@ -76,8 +76,8 @@ export default function Sidebar({
   onTasks: () => void;
   onMemory: () => void;
   page: 'chat' | 'tools' | 'tasks' | 'memory' | 'plugin';
-  toolsTab: 'mcp' | 'skills' | 'plugins' | 'connections';
-  onPage: (p: 'chat' | 'tools', tab?: 'mcp' | 'skills' | 'plugins' | 'connections') => void;
+  toolsTab: 'mcp' | 'skills' | 'plugins' | 'connections' | 'permissions';
+  onPage: (p: 'chat' | 'tools', tab?: 'mcp' | 'skills' | 'plugins' | 'connections' | 'permissions') => void;
   collapsed: boolean;
   onToggleCollapse: () => void;
   ideMode: boolean;
@@ -102,7 +102,7 @@ export default function Sidebar({
     e.stopPropagation();
     if (menu?.key === key) { setMenu(null); return; }
     const r = e.currentTarget.getBoundingClientRect();
-    const menuH = key.startsWith('session:') ? 168 : 56;
+    const menuH = key.startsWith('session:') ? 240 : 56;
     const openUp = r.bottom + 4 + menuH > window.innerHeight - 8;
     setMenu({
       key,
@@ -118,12 +118,13 @@ export default function Sidebar({
     document.addEventListener('mousedown', onDown);
     return () => document.removeEventListener('mousedown', onDown);
   }, [menu]);
-  const menuItem = (label: string, icon: ReactNode, onClick: () => void, danger = false) => (
+  const menuItem = (label: string, icon: ReactNode, onClick: () => void, danger = false, selected = false) => (
     <button
-      className={'row-menu-item' + (danger ? ' danger' : '')}
+      className={'row-menu-item' + (danger ? ' danger' : '') + (selected ? ' selected' : '')}
       onClick={(e) => { e.stopPropagation(); closeMenu(); onClick(); }}
     >
       {icon}<span>{label}</span>
+      {selected && <Check size={13} className="row-menu-check" />}
     </button>
   );
   const renderMenu = (key: string, children: ReactNode) => {
@@ -301,7 +302,7 @@ export default function Sidebar({
   const wsShort = (p: string) => p.split(/[\\/]/).filter(Boolean).slice(-1)[0] || p;
   const renderSession = (s: Session, nested = false) => {
     const busy = runningIds.has(s.id);
-    const strict = s.permission?.mode === 'strict';
+    const mode: SessionPermission['mode'] = s.permission?.mode ?? 'default';
     const key = `session:${s.id}`;
     return (
       <div
@@ -311,9 +312,9 @@ export default function Sidebar({
       >
         {!nested && <MessageSquare size={14} className="session-icon" />}
         <span className="session-title">{s.title}</span>
-        {strict && (
-          <span className="session-strict-badge" title="已开启严格确认模式">
-            <Shield size={11} />
+        {mode !== 'default' && (
+          <span className="session-strict-badge" title={mode === 'plan' ? '只读计划模式：禁止修改操作' : '严格确认模式：工具调用逐次确认'}>
+            {mode === 'plan' ? <Eye size={11} /> : <Shield size={11} />}
           </span>
         )}
         {busy ? (
@@ -326,10 +327,12 @@ export default function Sidebar({
           </span>
         )}
         {renderMenu(key, <>
-          {onToggleStrict && menuItem(
-            strict ? '关闭严格确认模式' : '开启严格确认模式',
-            <Shield size={15} />,
-            () => onToggleStrict(s.id),
+          {onSetPermissionMode && (
+            <>
+              {menuItem('默认模式', <Shield size={15} />, () => onSetPermissionMode(s.id, 'default'), false, mode === 'default')}
+              {menuItem('严格确认', <Shield size={15} />, () => onSetPermissionMode(s.id, 'strict'), false, mode === 'strict')}
+              {menuItem('只读计划', <Eye size={15} />, () => onSetPermissionMode(s.id, 'plan'), false, mode === 'plan')}
+            </>
           )}
           {onExportSession && menuItem('导出会话 JSON', <Download size={15} />, () => onExportSession(s.id))}
           {onHandoffSession && menuItem('交接到新会话', <ArrowRightLeft size={15} />, () => onHandoffSession(s.id))}
