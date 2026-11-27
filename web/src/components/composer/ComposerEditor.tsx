@@ -7,6 +7,7 @@ import { EditorView } from 'prosemirror-view';
 import 'prosemirror-view/style/prosemirror.css';
 import { extractSkillRefs } from '../../lib/skill-refs';
 import { attachmentKey } from '../../lib/attachments';
+import { filesFromDataTransfer, hasDroppedFiles } from '../../lib/dnd-files';
 import AttachmentHoverArea from '../AttachmentHoverArea';
 import { attachmentNode, documentKeys, draftText, parseDraft, schema } from './attachmentDocument';
 
@@ -19,7 +20,7 @@ export interface ComposerEditorProps {
   onSend: (text: string) => void;
   onRemoveAttachment: (index: number) => void;
   onSkillPaste?: (ids: string[]) => void;
-  onDropFiles: (files: FileList) => void;
+  onDropFiles: (files: File[]) => void;
   onRestoreAttachment: (att: Attachment) => void;
   submitWithModifier?: boolean;
   compactCompletion?: boolean;
@@ -138,13 +139,17 @@ export default function ComposerEditor(props: ComposerEditorProps) {
           return true;
         },
         drop(v, e) {
-          if (!e.dataTransfer?.files.length) return false;
+          if (!hasDroppedFiles(e.dataTransfer)) return false;
+          const dt = e.dataTransfer!;
           e.preventDefault();
           e.stopPropagation();
           if (v.editable) {
             const at = v.posAtCoords({ left: e.clientX, top: e.clientY });
             if (at) v.dispatch(v.state.tr.setSelection(TextSelection.create(v.state.doc, at.pos)));
-            latest.current.onDropFiles(e.dataTransfer.files);
+            // webkitGetAsEntry 必须同步调用，filesFromDataTransfer 内部已保证；空结果也要回调以复位拖拽高亮态
+            void filesFromDataTransfer(dt).then((files) => latest.current.onDropFiles(files));
+          } else {
+            latest.current.onDropFiles([]);
           }
           return true;
         },
@@ -152,7 +157,7 @@ export default function ComposerEditor(props: ComposerEditorProps) {
           if (!e.clipboardData || !v.editable) return false;
           e.preventDefault();
           e.stopPropagation();
-          if (e.clipboardData.files.length) latest.current.onDropFiles(e.clipboardData.files);
+          if (e.clipboardData.files.length) latest.current.onDropFiles(Array.from(e.clipboardData.files));
           else {
             let text = e.clipboardData.getData('text/plain').replace(/\r\n?/g, '\n');
             if (latest.current.onSkillPaste) {

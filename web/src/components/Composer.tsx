@@ -3,6 +3,7 @@ import type { RefObject } from 'react';
 import { ArrowRightLeft, ArrowUp, Check, ChevronDown, Copy, CornerDownRight, FileText, HelpCircle, Image as ImageIcon, Link2, Paperclip, Pencil, Sparkles, Square, Trash2, X } from 'lucide-react';
 import type { Attachment, ContextReading, HandoffContext, ViewMessage } from '@paw/shared';
 import { getSkills, type ModelInfo } from '../api/client';
+import { filesFromDataTransfer, hasDroppedFiles } from '../lib/dnd-files';
 import ModelMenu from './ModelMenu';
 import WorkspacePicker from './WorkspacePicker';
 import ComposerEditor, { type ComposerFocus } from './composer/ComposerEditor';
@@ -77,7 +78,7 @@ export default function Composer({
   onEditQueued?: (id: string) => void;
   onDeleteQueued?: (id: string) => void;
   onInput: (v: string) => void;
-  onAddFiles: (files: FileList | null) => void;
+  onAddFiles: (files: FileList | File[] | null) => void;
   onRemoveFile: (i: number) => void;
   /** 粘贴里带了 @skill:xxx —— 转成已选技能 */
   onSkillPaste: (skillIds: string[]) => void;
@@ -299,7 +300,7 @@ export default function Composer({
       <div
         className={'composer' + (dragging ? ' dragging' : '')}
         onDragOver={(e) => {
-          if (!e.dataTransfer.types.includes('Files')) return;
+          if (!hasDroppedFiles(e.dataTransfer)) return;
           e.preventDefault();
           setDragging(true);
         }}
@@ -312,8 +313,9 @@ export default function Composer({
           setDragging(false);
           // 内层（编辑器）已经处理过了，这里只管重置拖拽态
           if (e.defaultPrevented) return;
+          if (!hasDroppedFiles(e.dataTransfer)) return;
           e.preventDefault();
-          if (e.dataTransfer.files.length) onAddFiles(e.dataTransfer.files);
+          void filesFromDataTransfer(e.dataTransfer).then((files) => { if (files.length) onAddFiles(files); });
         }}
       >
         <ComposerEditor
@@ -326,7 +328,7 @@ export default function Composer({
           onSkillPaste={onSkillPaste}
           onDropFiles={(files) => {
             setDragging(false);
-            onAddFiles(files);
+            if (files.length) onAddFiles(files);
           }}
           placeholder={
             btwMode

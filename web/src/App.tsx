@@ -7,6 +7,7 @@ import {
 } from './api/client';
 import { widgetBlockFromEvent } from './lib/session-sync';
 import { clearAttachments } from './lib/attachments';
+import { filesFromDataTransfer, hasDroppedFiles } from './lib/dnd-files';
 import { extractSkillRefs } from './lib/skill-refs';
 import { toChatMessages } from './lib/store';
 import { useAttachments } from './hooks/useAttachments';
@@ -1620,10 +1621,13 @@ export default function App() {
           )}
         </header>
         <div className="messages-wrap">
-          <div className="messages" ref={bottom.ref} onScroll={bottom.onScroll} onDragOver={(e) => e.preventDefault()} onDrop={(e) => {
-            e.preventDefault();
-            if (e.dataTransfer.files.length) void addFiles(e.dataTransfer.files);
-          }}>
+          <div className="messages" ref={bottom.ref} onScroll={bottom.onScroll}
+            onDragOver={(e) => { if (hasDroppedFiles(e.dataTransfer)) e.preventDefault(); }}
+            onDrop={(e) => {
+              if (!hasDroppedFiles(e.dataTransfer)) return;
+              e.preventDefault();
+              void filesFromDataTransfer(e.dataTransfer).then((files) => { if (files.length) void addFiles(files); });
+            }}>
             {!active || active.messages.length === 0 ? (
               <div className="empty">
                 <div className="empty-badge" aria-hidden="true"><span>🐾</span></div>

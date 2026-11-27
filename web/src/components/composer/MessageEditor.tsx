@@ -2,6 +2,7 @@ import { useLayoutEffect, useRef, useState } from 'react';
 import { Paperclip } from 'lucide-react';
 import type { Attachment } from '@paw/shared';
 import { addAttachments, MAX_ATTACHMENTS, readFiles } from '../../lib/attachments';
+import { filesFromDataTransfer, hasDroppedFiles } from '../../lib/dnd-files';
 import ComposerEditor, { type ComposerFocus } from './ComposerEditor';
 
 interface Props {
@@ -22,7 +23,7 @@ export default function MessageEditor({ text, attachments, onCancel, onSubmit }:
   const shortcut = /Mac|iPhone|iPad/.test(navigator.platform) ? '⌘ Enter' : 'Ctrl + Enter';
   useLayoutEffect(() => { focusRef.current?.focus(); }, []);
 
-  async function attach(list: FileList) {
+  async function attach(list: File[] | FileList) {
     if (sending || reading || !list.length) return;
     setReading(true);
     setError('');
@@ -66,11 +67,11 @@ export default function MessageEditor({ text, attachments, onCancel, onSubmit }:
           onCancel();
         }
       }}
-      onDragOver={(e) => { if (e.dataTransfer.types.includes('Files')) e.preventDefault(); }}
+      onDragOver={(e) => { if (hasDroppedFiles(e.dataTransfer)) e.preventDefault(); }}
       onDrop={(e) => {
-        if (!e.dataTransfer.files.length) return;
+        if (!hasDroppedFiles(e.dataTransfer)) return;
         e.preventDefault();
-        void attach(e.dataTransfer.files);
+        void filesFromDataTransfer(e.dataTransfer).then((files) => { if (files.length) void attach(files); });
       }}
       onPaste={(e) => {
         if (!e.clipboardData.files.length) return;
