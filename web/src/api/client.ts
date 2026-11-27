@@ -421,13 +421,28 @@ export async function getWorkspace(): Promise<WorkspaceInfo> {
   try { return await (await fetch('/api/workspace')).json(); }
   catch { return { root: null, workspaces: [], candidates: [] }; }
 }
-export async function setWorkspace(root: string | null): Promise<void> {
-  const r = await fetch('/api/workspace', { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ root }) });
-  if (r.ok) window.dispatchEvent(new Event(WORKSPACE_CHANGED));
+// 工作区写入串行化：快速切会话会连发多个 PUT，乱序完成会让「最后一次点击」
+// 被更早发出的旧值覆盖（表现：点别的会话再点回来，当前工作区高亮丢了）。
+// 同时用 epoch 守卫：只有最新一次排队的写入才派发 WORKSPACE_CHANGED，避免中间态旧值短暂覆盖 UI。
+let wsWriteQueue: Promise<unknown> = Promise.resolve();
+let wsWriteEpoch = 0;
+function queueWsWrite(op: (isLatest: () => boolean) => Promise<void>): Promise<void> {
+  const epoch = ++wsWriteEpoch;
+  const run = wsWriteQueue.then(() => op(() => epoch === wsWriteEpoch), () => op(() => epoch === wsWriteEpoch));
+  wsWriteQueue = run.catch(() => { /* 队列不断链 */ });
+  return run;
 }
-export async function removeWorkspace(root: string): Promise<void> {
-  const r = await fetch('/api/workspace', { method: 'DELETE', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ root }) });
-  if (r.ok) window.dispatchEvent(new Event(WORKSPACE_CHANGED));
+export function setWorkspace(root: string | null): Promise<void> {
+  return queueWsWrite(async (isLatest) => {
+    const r = await fetch('/api/workspace', { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ root }) });
+    if (r.ok && isLatest()) window.dispatchEvent(new CustomEvent(WORKSPACE_CHANGED, { detail: { root } }));
+  });
+}
+export function removeWorkspace(root: string): Promise<void> {
+  return queueWsWrite(async (isLatest) => {
+    const r = await fetch('/api/workspace', { method: 'DELETE', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ root }) });
+    if (r.ok && isLatest()) window.dispatchEvent(new Event(WORKSPACE_CHANGED));
+  });
 }
 
 // 弹出 macOS Finder 选文件夹，返回选中路径（取消返回 null）

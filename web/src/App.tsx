@@ -435,6 +435,31 @@ export default function App() {
   const onNew = () => startNewChat(null);
   const onNewInWorkspace = (workspace: string) => startNewChat(workspace);
 
+  // 空白新对话上用户通过工作区选择器切换/添加工作区 → 这是显式意图，覆盖 startNewChat 预设的归属。
+  // 不这么做：顶层「新会话」把 explicit 置空后，用户再在工作区 + 里选了文件夹，
+  // 首条消息仍会按过期的 null 建到「最近任务」。
+  useEffect(() => {
+    let seq = 0;
+    const sync = (e: Event) => {
+      const cur = ++seq;
+      if (activeIdRef.current) return; // 已有会话：工作区跟随会话，不动 explicit
+      const detail = (e as CustomEvent<{ root?: string | null }>).detail;
+      if (detail && 'root' in detail) {
+        const nextRoot = detail.root ?? null;
+        nextWorkspaceRef.current = { value: nextRoot };
+        setIdeRoot(nextRoot);
+        return;
+      }
+      void getWorkspace().then((w) => {
+        if (cur !== seq || activeIdRef.current) return;
+        nextWorkspaceRef.current = { value: w.root };
+        setIdeRoot(w.root);
+      });
+    };
+    window.addEventListener(WORKSPACE_CHANGED, sync);
+    return () => window.removeEventListener(WORKSPACE_CHANGED, sync);
+  }, []);
+
   const switchProvider = async (p: SearchProvider) => {
     setProviderMenu(false);
     try { await setSearchConfig(p); setProvider(p); }
