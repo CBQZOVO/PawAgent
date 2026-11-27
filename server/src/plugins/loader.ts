@@ -433,8 +433,8 @@ export async function loadExternalPluginsFromDir(
           listRuns,
         },
         skills: {
-          list: loadSkills,
-          read: loadSkillContent,
+          list: () => loadSkills(),
+          read: (id: string) => loadSkillContent(id),
         },
         notify: notifyDone,
       };

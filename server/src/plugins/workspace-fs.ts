@@ -2,6 +2,7 @@ import { readFile, stat } from 'node:fs/promises';
 import type { PawPlugin, ToolSchema } from '@paw/kernel';
 import { FS_TOOL_SCHEMAS, executeFsTool } from '../tools/fs.js';
 import { EDIT_TOOL_SCHEMAS, executeEditTool } from '../tools/edit.js';
+import { ANALYZE_CODE_IMPACT_SCHEMA, executeAnalyzeCodeImpact } from '../tools/dep-graph.js';
 import { resolveToolPath } from '../workspace.js';
 import { recordFileChange } from '../snapshots.js';
 import type { ServerToolExecCtx } from './types.js';
@@ -56,6 +57,12 @@ export const workspaceFsPlugin: PawPlugin<ServerToolExecCtx> = {
       execute: (args: Record<string, unknown>, _id: string, ctx: ServerToolExecCtx) =>
         executeFsTool(schema.name, args, ctx.workspace, ctx.signal),
     })),
+    {
+      schema: ANALYZE_CODE_IMPACT_SCHEMA,
+      meta: { readOnly: true, prunable: true },
+      execute: (args: Record<string, unknown>, _id: string, ctx: ServerToolExecCtx) =>
+        executeAnalyzeCodeImpact(args, ctx.workspace, ctx.signal),
+    },
     ...EDIT_TOOL_SCHEMAS.map((schema) => ({
       schema,
       meta: { mutating: true },

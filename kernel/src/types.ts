@@ -36,7 +36,7 @@ export interface ToolResult {
 export type PermissionDecision = 'allow_once' | 'deny' | 'allow_session' | 'deny_session';
 
 export interface SessionPermission {
-  mode: 'default' | 'strict';
+  mode: 'default' | 'strict' | 'plan';
   allow: string[];
   deny: string[];
 }
@@ -48,8 +48,10 @@ export interface AskQuestion {
 }
 
 export interface TodoItem {
+  id?: string;
   content: string;
   status: 'pending' | 'in_progress' | 'completed';
+  dependsOn?: string[];
 }
 
 export type SubagentStatus = 'running' | 'completed' | 'error' | 'aborted' | 'timeout' | 'limit';
@@ -252,6 +254,11 @@ export interface ToolRuntime {
   isReadOnly?(name: string): boolean;
   isMutating?(name: string, args: Record<string, unknown>): boolean;
   isPrunable?(name: string): boolean;
+  getResourceAccess?(name: string, args: Record<string, unknown>): {
+    lane?: 'subagent' | 'normal';
+    reads: string[];
+    writes: string[];
+  };
   formatHistoryResult?(name: string, content: string, prunableCountInRound: number): string;
   summarizeCall?(name: string, args?: Record<string, unknown>, provided?: string): string;
   normalizeAskQuestions?(raw: unknown): AskQuestion[];

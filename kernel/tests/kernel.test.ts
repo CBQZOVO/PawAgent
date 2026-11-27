@@ -224,4 +224,143 @@ assert.equal(rtRes.isError, false);
   assert.equal(doneRounds, 3, 'done 事件应上报准确的模型轮次数');
 }
 
+// 5. Fork Tree LCA、Predicate Policy、DAG 拓扑及无冲突文件并发调度单测
+{
+  const {
+    computeForkLCA,
+    buildSessionForkTree,
+    pred,
+    evaluatePermissionPolicy,
+    verifyPolicyRuleTable,
+    DEFAULT_PERMISSION_RULES,
+    topologicalLayers,
+    scheduleToolBatches,
+    bfsReachableClosure,
+  } = await import('../src/index.js');
+
+  // 5a. 多层分叉树 LCA：root -> branchA(t=10) -> leafA1(t=30) 与 root -> branchB(t=20)
+  const nodes = new Map([
+    ['root', { id: 'root' }],
+    ['branchA', { id: 'branchA', forkFrom: { sessionId: 'root', messageId: 'm1', ts: 10 } }],
+    ['leafA1', { id: 'leafA1', forkFrom: { sessionId: 'branchA', messageId: 'm2', ts: 30 } }],
+    ['branchB', { id: 'branchB', forkFrom: { sessionId: 'root', messageId: 'm3', ts: 20 } }],
+    ['isolated', { id: 'isolated' }],
+  ]);
+  const lca = computeForkLCA('leafA1', 'branchB', (id) => nodes.get(id));
+  assert.ok(lca);
+  assert.equal(lca.lcaSessionId, 'root');
+  assert.equal(lca.pivotTs, 10, '共享截止时间应取 min(10, 20) = 10');
+  assert.deepEqual(lca.fromChain, ['leafA1', 'branchA', 'root']);
+  assert.deepEqual(lca.toChain, ['root', 'branchB']);
+  assert.equal(computeForkLCA('leafA1', 'isolated', (id) => nodes.get(id)), null, '不同源会话返回 null');
+
+  const forest = buildSessionForkTree([...nodes.values()]);
+  assert.equal(forest.length, 2);
+
+  // 5b. 形式化规则表矛盾检测：人为注入同优先级冲突规则必须被检出
+  const brokenReport = verifyPolicyRuleTable([
+    ...DEFAULT_PERMISSION_RULES,
+    {
+      id: 'contradictory-deny-in-default',
+      description: '故意与 default-mode-allow 同优先级冲突',
+      priority: 100,
+      when: pred('mode=default', (x) => x.permission.mode === 'default'),
+      effect: 'deny',
+    },
+  ]);
+  assert.equal(brokenReport.valid, false);
+  assert.ok(brokenReport.contradictions.length > 0, '同优先级矛盾规则必须被真值表检验捕获');
+
+  // 5c. DAG 拓扑波次 + runAgent 无冲突写并发 & 同文件写后读保序
+  const topo = topologicalLayers(
+    [
+      { id: 'a', deps: [] },
+      { id: 'b', deps: ['a'] },
+      { id: 'c', deps: ['a'] },
+      { id: 'd', deps: ['b', 'c'] },
+    ],
+    (x) => x.id,
+    (x) => x.deps,
+  );
+  assert.deepEqual(topo.layers.map((w) => w.map((x) => x.id)), [['a'], ['b', 'c'], ['d']]);
+
+  const batches = scheduleToolBatches(
+    [
+      { id: '1', path: 'a.ts', op: 'write' },
+      { id: '2', path: 'b.ts', op: 'write' },
+      { id: '3', path: 'a.ts', op: 'read' },
+    ],
+    (x) => x.op === 'write'
+      ? { reads: [x.path], writes: [x.path] }
+      : { reads: [x.path], writes: [] },
+  );
+  assert.deepEqual(batches.map((b) => b.items.map((x) => x.id)), [['1', '2'], ['3']]);
+
+  // 验证在 runAgent 中 write(a.ts) 与 write(b.ts) 真正并发重叠，且 read(a.ts) 在 write(a.ts) 完成后才启动
+  let activeWrites = 0;
+  let maxConcurrentWrites = 0;
+  const orderLog: string[] = [];
+  let rIdx = 0;
+  for await (const _ev of runAgent({
+    streamChat: async function* () {
+      if (++rIdx === 1) {
+        yield {
+          toolCalls: [
+            { index: 0, id: 'w1', name: 'scoped_write', arguments: '{"path":"a.ts"}' },
+            { index: 1, id: 'w2', name: 'scoped_write', arguments: '{"path":"b.ts"}' },
+            { index: 2, id: 'r1', name: 'scoped_read', arguments: '{"path":"a.ts"}' },
+          ],
+          finishReason: 'tool_calls',
+        };
+        return;
+      }
+      yield { content: 'done' };
+    },
+    model: 'm',
+    tools: {
+      getSchemas: () => [
+        { name: 'scoped_write', description: 'w', parameters: { type: 'object', properties: { path: { type: 'string' } } } },
+        { name: 'scoped_read', description: 'r', parameters: { type: 'object', properties: { path: { type: 'string' } } } },
+      ],
+      getResourceAccess: (name, args) => name === 'scoped_write'
+        ? { reads: [String(args.path)], writes: [String(args.path)] }
+        : { reads: [String(args.path)], writes: [] },
+      execute: async (name, args, id) => {
+        if (name === 'scoped_write') {
+          activeWrites++;
+          maxConcurrentWrites = Math.max(maxConcurrentWrites, activeWrites);
+          orderLog.push(`start:${name}:${args.path}`);
+          await new Promise((r) => setTimeout(r, 25));
+          orderLog.push(`end:${name}:${args.path}`);
+          activeWrites--;
+        } else {
+          orderLog.push(`read:${args.path}`);
+        }
+        return { tool_call_id: id, content: 'ok' };
+      },
+    },
+    input: [{ role: 'user', content: 'go' }],
+  })) { /* drain */ }
+  assert.equal(maxConcurrentWrites, 2, '互不冲突的两个文件写入应当并发执行');
+  assert.ok(
+    orderLog.indexOf('end:scoped_write:a.ts') < orderLog.indexOf('read:a.ts'),
+    '同文件的读取必须在写入完成后才执行（RAW 因果依赖）',
+  );
+
+  // 5d. BFS 可达闭包
+  const g = new Map<string, string[]>([['A', ['B', 'C']], ['B', ['D']], ['C', ['D']], ['D', ['E']]]);
+  const closure = bfsReachableClosure(['A'], (u) => g.get(u) ?? [], 2);
+  assert.deepEqual(closure.map((x) => [x.node, x.depth]), [['B', 1], ['C', 1], ['D', 2]]);
+  assert.equal(evaluatePermissionPolicy({
+    tool: 'read_file',
+    args: {},
+    permission: { mode: 'plan', allow: [], deny: [] },
+    isInternalSafe: false,
+    isPluginReadOnly: true,
+    isMcpReadOnly: false,
+    isMutatingApi: false,
+    isReadOnlyShell: false,
+  }).effect, 'allow');
+}
+
 console.log('✓ @paw/kernel standalone tests passed');

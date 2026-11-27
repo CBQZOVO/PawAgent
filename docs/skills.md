@@ -6,10 +6,16 @@ Paw 通过 `SKILL.md` 将可复用的工作流程沉淀为本地技能，供 Age
 
 ## 1. 目录结构
 
-默认扫描用户目录 `~/.paw/skill/`（可通过环境变量 `PAW_SKILLS_DIR` 覆盖），采用扁平目录布局，每个子目录对应一个技能：
+Paw 按以下三层顺序扫描技能目录，**同名时后者覆盖前者（项目级优先于全局）**：
+
+1. 用户全局目录：`~/.paw/skill/`（可通过环境变量 `PAW_SKILLS_DIR` 覆盖）
+2. 工作区开放标准目录：`<workspace>/.agents/skills/`（兼容 OpenSpec / Agent Skills 等项目级技能）
+3. 工作区 Paw 专属目录：`<workspace>/.paw/skills/`
+
+各目录均采用扁平布局，每个子目录对应一个技能：
 
 ```text
-~/.paw/skill/
+~/.paw/skill/  或  <workspace>/.agents/skills/
 └── release-check/
     ├── SKILL.md          # 必需：YAML frontmatter + Markdown 正文
     ├── references/       # 可选：参考文档、接口规范
@@ -41,8 +47,8 @@ version: 1.0.0
 
 ## 2. 使用方式
 
-- **自动触发**：Paw 按 `mtime` 缓存扫描 `~/.paw/skill/*/SKILL.md`，将名称与描述注入上下文；命中任务时，Agent 使用 `read_file` 按需读取完整 `SKILL.md`。
-- **手动指定**：在输入框工具栏选择指定技能，Paw 会将去掉 frontmatter 后的正文直接注入本轮 `<selected_skills>`。
+- **自动触发**：Paw 按 `mtime` 缓存扫描全局与当前工作区的技能目录，将名称与描述注入上下文；命中任务时，Agent 使用 `read_file` 按需读取完整 `SKILL.md`。
+- **手动指定**：在输入框工具栏选择指定技能，或在输入框首字符输入 `/` 通过快捷命令菜单检索并选中技能，Paw 会将去掉 frontmatter 后的正文直接注入本轮 `<selected_skills>`。
 
 ---
 

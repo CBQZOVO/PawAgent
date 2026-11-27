@@ -364,6 +364,45 @@ export async function rewindFiles(sessionId: string, beforeTs: number): Promise<
   return r.json();
 }
 
+/** 从指定消息创建会话分叉（原会话消息保留，工作区按基线回退并继承前置快照） */
+export async function forkSessionApi(
+  sessionId: string,
+  messageId: string,
+  title?: string,
+): Promise<{ ok: boolean; session: SessionSummary; restored: string[]; skipped: string[] }> {
+  const r = await fetch(`/api/sessions/${encodeURIComponent(sessionId)}/fork`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ messageId, ...(title ? { title } : {}) }),
+  });
+  const d = await r.json().catch(() => ({}));
+  if (!r.ok) throw new Error(d.error || `分叉会话失败（HTTP ${r.status}）`);
+  return d;
+}
+
+/** 跨同源分叉切换工作区文件状态（服务端通过最近公共祖先 LCA 自动撤销/重放快照） */
+export async function switchSessionWorkspaceApi(
+  fromSessionId: string,
+  toSessionId: string,
+): Promise<{
+  ok: boolean;
+  switched: boolean;
+  lcaSessionId: string | null;
+  pivotTs: number | null;
+  restored: string[];
+  replayed: string[];
+  skipped: string[];
+}> {
+  const r = await fetch(`/api/sessions/${encodeURIComponent(toSessionId)}/switch`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ fromSessionId }),
+  });
+  const d = await r.json().catch(() => ({}));
+  if (!r.ok) throw new Error(d.error || `切换分支工作区状态失败（HTTP ${r.status}）`);
+  return d;
+}
+
 export async function putSessions(sessions: Session[]): Promise<void> {
   const r = await fetch('/api/sessions', {
     method: 'PUT',
@@ -399,8 +438,9 @@ export async function getTaskRuns(id: string): Promise<import('@paw/shared').Tas
   return d.runs || [];
 }
 
-// 技能列表（供输入框选择器）
-export async function getSkills(): Promise<{ id: string; name: string; description: string }[]> {
+// 技能列表（供输入框选择器与 / 快捷菜单）
+export interface SkillSummary { id: string; name: string; description: string; source?: 'user' | 'workspace' }
+export async function getSkills(): Promise<SkillSummary[]> {
   try {
     const d = await (await fetch('/api/skills')).json();
     return d.skills || [];

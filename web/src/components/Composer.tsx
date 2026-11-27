@@ -3,15 +3,13 @@ import type { RefObject } from 'react';
 import { ArrowRightLeft, ArrowUp, Check, ChevronDown, Copy, CornerDownRight, Folder, HelpCircle, Image as ImageIcon, Link2, Paperclip, Pencil, Sparkles, Square, Trash2, X } from 'lucide-react';
 import FileBadge from './FileBadge';
 import type { Attachment, ContextReading, HandoffContext, ViewMessage } from '@paw/shared';
-import { getSkills, type ModelInfo } from '../api/client';
+import { getSkills, WORKSPACE_CHANGED, type ModelInfo, type SkillSummary } from '../api/client';
 import { filesFromDataTransfer, hasDroppedFiles } from '../lib/dnd-files';
 import ModelMenu from './ModelMenu';
 import WorkspacePicker from './WorkspacePicker';
 import ComposerEditor, { type ComposerFocus } from './composer/ComposerEditor';
 import ContextMeter from './composer/ContextMeter';
 import Markdown from './Markdown';
-
-interface SkillItem { id: string; name: string; description: string }
 
 export interface QueuedMessage {
   id: string;
@@ -101,8 +99,15 @@ export default function Composer({
   const [connMenu, setConnMenu] = useState(false);
   const [conns, setConns] = useState<{ code: string; name: string; kind?: string }[]>([]);
   const [skillSearch, setSkillSearch] = useState('');
-  const [skills, setSkills] = useState<SkillItem[]>([]);
+  const [skills, setSkills] = useState<SkillSummary[]>([]);
   const isImageModel = /^gpt-image-/i.test(model);
+
+  useEffect(() => {
+    const load = () => void getSkills().then(setSkills);
+    load();
+    window.addEventListener(WORKSPACE_CHANGED, load);
+    return () => window.removeEventListener(WORKSPACE_CHANGED, load);
+  }, []);
 
   useEffect(() => {
     if (skillMenu) void getSkills().then(setSkills);
@@ -134,8 +139,9 @@ export default function Composer({
     document.addEventListener('mousedown', onDown);
     return () => document.removeEventListener('mousedown', onDown);
   }, [skillMenu]);
-  const filteredSkills = skills.filter((s) =>
-    (s.name + s.description).toLowerCase().includes(skillSearch.toLowerCase()));
+  const filteredSkills = skills
+    .filter((s) => (s.id + ' ' + s.name + ' ' + s.description).toLowerCase().includes(skillSearch.toLowerCase()))
+    .sort((a, b) => Number(b.source === 'workspace') - Number(a.source === 'workspace'));
   // 拖文件进输入框：之前这块没有 drop handler，文件冒泡到页面默认行为，
   // Electron 直接把窗口导航到那个文件（看起来就是「自动打开了」）。
   const [dragging, setDragging] = useState(false);
@@ -341,6 +347,8 @@ export default function Composer({
                   : '给 Paw 发消息…  Enter 发送，Shift+Enter 换行'
           }
           compactCompletion={!readingFiles && !attachments.length}
+          skills={skills}
+          onSelectSkill={(id) => { if (!selectedSkills.includes(id)) onToggleSkill(id); }}
           disabled={compacting}
           focusRef={focusRef}
         />
@@ -374,7 +382,13 @@ export default function Composer({
                   {filteredSkills.map((s) => (
                     <button key={s.id} className={'skill-opt' + (selectedSkills.includes(s.id) ? ' selected' : '')}
                       onClick={() => onToggleSkill(s.id)}>
-                      <span><strong>{s.name}</strong><small>{s.description.slice(0, 50)}</small></span>
+                      <span>
+                        <strong>
+                          {s.name}
+                          {s.source === 'workspace' && <em className="skill-source-tag">项目</em>}
+                        </strong>
+                        <small>{s.description.slice(0, 50)}</small>
+                      </span>
                       {selectedSkills.includes(s.id) && <Check size={13} />}
                     </button>
                   ))}

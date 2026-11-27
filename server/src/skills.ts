@@ -1,19 +1,48 @@
-// Skill 接入：扫描用户级 ~/.paw/skill/*/SKILL.md（可通过 PAW_SKILLS_DIR 覆盖），
+// Skill 接入：扫描用户级 ~/.paw/skill/*/SKILL.md（可通过 PAW_SKILLS_DIR 覆盖）
+// 以及当前工作区 <workspace>/.agents/skills/*/SKILL.md 和 <workspace>/.paw/skills/*/SKILL.md，
+// 同名后者覆盖前者（项目级优先于全局）。
 // 解析 frontmatter 的 name/description，把清单注入 user-context。
 // 模型要用某个 skill 时，用内置 read_file 工具读它的 SKILL.md 全文照做。
 import { mkdir, readdir, readFile, stat, writeFile } from 'node:fs/promises';
 import path from 'node:path';
 import { DATA_DIR } from './paths.js';
+import { getWorkspaceRoot } from './workspace.js';
 
 // Paw 专用技能目录（放在 ~/.paw/skill，重装不丢；结构：每个子目录一个 SKILL.md）
 // PAW_SKILLS_DIR 可覆盖（测试用临时目录，别往真技能目录里写垃圾）
 export const SKILLS_DIR = process.env.PAW_SKILLS_DIR
   ? path.resolve(process.env.PAW_SKILLS_DIR)
   : path.join(DATA_DIR, 'skill');
-let listCache: { mtime: number; skills: SkillInfo[] } | null = null;
-let blockCache: { mtime: number; block: string } | null = null;
 
-interface SkillInfo { dir: string; name: string; description: string; file: string }
+// 工作区级技能相对目录（按优先级升序，同名后者覆盖前者）：
+// .agents/skills 兼容 Agent Skills / OpenSpec 等开放生态，.paw/skills 为 Paw 专属覆盖层
+const WORKSPACE_SKILL_REL_DIRS = ['.agents/skills', '.paw/skills'] as const;
+
+export interface SkillInfo {
+  dir: string;
+  name: string;
+  description: string;
+  file: string;
+  source: 'user' | 'workspace';
+}
+
+interface SkillRoot { dir: string; source: 'user' | 'workspace' }
+
+let listCache: { fingerprint: string; skills: SkillInfo[] } | null = null;
+let blockCache: { fingerprint: string; block: string } | null = null;
+
+/** 解析当前应扫描的技能根目录（按优先级升序，同名后者覆盖前者）。
+ *  workspace === undefined 沿用当前工作区；null 明确只扫全局目录。 */
+async function resolveSkillRoots(workspace?: string | null): Promise<{ key: string; roots: SkillRoot[] }> {
+  const ws = workspace === undefined ? await getWorkspaceRoot() : workspace;
+  const roots: SkillRoot[] = [{ dir: SKILLS_DIR, source: 'user' }];
+  if (ws) {
+    for (const rel of WORKSPACE_SKILL_REL_DIRS) {
+      roots.push({ dir: path.join(ws, rel), source: 'workspace' });
+    }
+  }
+  return { key: ws ?? '', roots };
+}
 
 /** 解析 SKILL.md 的 YAML frontmatter（只要 name/description 两个简单字段） */
 function parseFrontmatter(text: string): { name?: string; description?: string } {
@@ -24,71 +53,88 @@ function parseFrontmatter(text: string): { name?: string; description?: string }
   const out: { name?: string; description?: string } = {};
   for (const line of fm.split('\n')) {
     const m = line.match(/^(name|description):\s*(.+)$/);
-    if (m) out[m[1] as 'name' | 'description'] = m[2].trim().replace(/^['"]|['"]$/g, '');
+    if (m) {
+      const rawVal = m[2].trim();
+      let cleanVal = rawVal.replace(/^['"]|['"]$/g, '');
+      if (rawVal.startsWith('"') && rawVal.endsWith('"')) {
+        try { cleanVal = String(JSON.parse(rawVal)); } catch { /* 保持剥引号兜底 */ }
+      }
+      out[m[1] as 'name' | 'description'] = cleanVal;
+    }
   }
   return out;
 }
 
-/** 扫描 skills 目录，返回技能清单。
- *  mtime 门控缓存：每次先 stat 各 SKILL.md 求指纹（便宜），指纹没变不重读正文；改动即时生效。 */
-export async function loadSkills(): Promise<SkillInfo[]> {
-  let dirs: string[];
-  let latest = 0;
-  try {
-    dirs = await readdir(SKILLS_DIR);
-    latest = (await stat(SKILLS_DIR)).mtimeMs;
-  } catch {
-    return [];
-  }
-  const found: { dir: string; file: string; mtimeMs: number }[] = [];
-  for (const d of dirs) {
-    const file = path.join(SKILLS_DIR, d, 'SKILL.md');
-    try {
-      found.push({ dir: d, file, mtimeMs: (await stat(file)).mtimeMs });
-    } catch { /* 没有 SKILL.md 就跳过 */ }
-  }
-  for (const f of found) latest = Math.max(latest, f.mtimeMs);
-  if (listCache && listCache.mtime === latest) return listCache.skills;
+/** 扫描技能目录，返回技能清单（同名时项目级覆盖全局）。
+ *  mtime 门控缓存：每次先 stat 各目录与 SKILL.md 求指纹（便宜），指纹没变不重读正文；改动即时生效。 */
+export async function loadSkills(workspace?: string | null): Promise<SkillInfo[]> {
+  const { key, roots } = await resolveSkillRoots(workspace);
+  const found: { dir: string; file: string; source: 'user' | 'workspace'; mtimeMs: number }[] = [];
 
-  const skills: SkillInfo[] = [];
+  for (const root of roots) {
+    let dirs: string[];
+    try {
+      dirs = await readdir(root.dir);
+    } catch {
+      continue;
+    }
+    dirs.sort();
+    for (const d of dirs) {
+      const file = path.join(root.dir, d, 'SKILL.md');
+      try {
+        const mtimeMs = (await stat(file)).mtimeMs;
+        found.push({ dir: d, file, source: root.source, mtimeMs });
+      } catch { /* 没有 SKILL.md 就跳过 */ }
+    }
+  }
+
+  const fingerprint = `${key}::` + found.map((f) => `${f.source}:${f.dir}:${f.file}:${f.mtimeMs}`).join('|');
+  if (listCache && listCache.fingerprint === fingerprint) return listCache.skills;
+
+  const byId = new Map<string, SkillInfo>();
   for (const f of found) {
     try {
       const text = await readFile(f.file, 'utf-8');
       const fm = parseFrontmatter(text);
-      skills.push({
+      byId.set(f.dir, {
         dir: f.dir,
         name: fm.name || f.dir,
         description: (fm.description || '').slice(0, 200),
         file: f.file,
+        source: f.source,
       });
     } catch { /* 读失败就跳过 */ }
   }
-  listCache = { mtime: latest, skills };
+  const skills = Array.from(byId.values());
+  listCache = { fingerprint, skills };
   return skills;
 }
 
-/** 读指定 skill 的 SKILL.md 全文（去掉 frontmatter），用于用户选中后注入 */
-export async function loadSkillContent(id: string): Promise<string | null> {
+/** 读指定 skill 的 SKILL.md 全文（去掉 frontmatter），用于用户选中后注入。
+ *  同名时优先读取项目级（.paw/skills → .agents/skills → ~/.paw/skill）。 */
+export async function loadSkillContent(id: string, workspace?: string | null): Promise<string | null> {
   // id 是目录名，防路径穿越：不允许斜杠和 ..，其余（含中文）都可以
   if (!/^[\w\u4e00-\u9fa5.-]+$/.test(id) || id.includes('..')) return null;
-  try {
-    let text = await readFile(path.join(SKILLS_DIR, id, 'SKILL.md'), 'utf-8');
-    if (text.startsWith('---')) {
-      const end = text.indexOf('\n---', 3);
-      if (end >= 0) text = text.slice(end + 4).trimStart();
-    }
-    return text.trim();
-  } catch {
-    return null;
+  const { roots } = await resolveSkillRoots(workspace);
+  for (let i = roots.length - 1; i >= 0; i--) {
+    try {
+      let text = await readFile(path.join(roots[i].dir, id, 'SKILL.md'), 'utf-8');
+      if (text.startsWith('---')) {
+        const end = text.indexOf('\n---', 3);
+        if (end >= 0) text = text.slice(end + 4).trimStart();
+      }
+      return text.trim();
+    } catch { /* 当前层级没有，继续往下一层找 */ }
   }
+  return null;
 }
 
 /** 生成注入到 user-context 的 <available_skills> 块（复用清单缓存的 mtime 指纹） */
-export async function loadSkillsBlock(): Promise<string> {
-  const skills = await loadSkills();
+export async function loadSkillsBlock(workspace?: string | null): Promise<string> {
+  const skills = await loadSkills(workspace);
   if (!skills.length) return '';
-  const mtime = listCache?.mtime ?? 0;
-  if (blockCache && blockCache.mtime === mtime) return blockCache.block;
+  const fingerprint = listCache?.fingerprint ?? '';
+  if (blockCache && blockCache.fingerprint === fingerprint) return blockCache.block;
 
   const lines = skills.map((s) =>
     `- **${s.name}**: ${s.description || '（无描述）'} [读 ${s.file} 获取完整指令]`
@@ -99,7 +145,7 @@ export async function loadSkillsBlock(): Promise<string> {
     ...lines,
     '</available_skills>',
   ].join('\n');
-  blockCache = { mtime, block };
+  blockCache = { fingerprint, block };
   return block;
 }
 
@@ -235,6 +281,8 @@ export async function createSkill(draft: SkillDraft): Promise<SkillWriteResult> 
   if (!parsed.name || !parsed.description) {
     throw new Error('写入后的 SKILL.md frontmatter 解析失败，请检查 description 里是否有多余的 ---');
   }
+  listCache = null;
+  blockCache = null;
 
   return { id, dir, file, written: ['SKILL.md', ...files.map((f) => f.path)], warnings };
 }

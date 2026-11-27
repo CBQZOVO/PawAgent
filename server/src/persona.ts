@@ -112,7 +112,7 @@ const EXECUTION_PLAYBOOK = [
  */
 export async function loadPersonaPrompt(workspace?: string | null): Promise<string> {
   const [skillsBlock, workspaceBlock, subagentsBlock, personaFiles] = await Promise.all([
-    loadSkillsBlock(),
+    loadSkillsBlock(workspace),
     loadWorkspaceBlock(workspace),
     loadSubagentsBlock(workspace),
     readPersonaFiles(),

@@ -13,6 +13,13 @@ import { attachmentNode, documentKeys, draftText, parseDraft, schema } from './a
 
 export interface ComposerFocus { focus: () => void }
 
+export interface SkillOption {
+  id: string;
+  name: string;
+  description: string;
+  source?: 'user' | 'workspace';
+}
+
 export interface ComposerEditorProps {
   value: string;
   attachments: Attachment[];
@@ -24,6 +31,8 @@ export interface ComposerEditorProps {
   onRestoreAttachment: (att: Attachment) => void;
   submitWithModifier?: boolean;
   compactCompletion?: boolean;
+  skills?: SkillOption[];
+  onSelectSkill?: (id: string) => void;
   placeholder: string;
   disabled: boolean;
   focusRef?: RefObject<ComposerFocus | null> | null;
@@ -44,34 +53,73 @@ const SLASH_COMMANDS = [
   { cmd: '/btw', insert: '/btw ', desc: '只读旁路提问（不调工具、不入主会话）' },
 ] as const;
 
+type SlashCandidate =
+  | { kind: 'cmd'; key: string; cmd: string; insert: string; desc: string }
+  | { kind: 'skill'; key: string; cmd: string; skillId: string; desc: string; source?: 'user' | 'workspace' };
+
 export default function ComposerEditor(props: ComposerEditorProps) {
   const host = useRef<HTMLDivElement>(null);
   const editor = useRef<EditorView | null>(null);
   const latest = useRef(props);
   latest.current = props;
-  const [candidates, setCandidates] = useState<typeof SLASH_COMMANDS[number][]>([]);
+  const [candidates, setCandidates] = useState<SlashCandidate[]>([]);
   const [activeIdx, setActiveIdx] = useState(0);
   const activeIdxRef = useRef(0);
   activeIdxRef.current = activeIdx;
   const dismissed = useRef(false);
-  const matchingCommands = (v: EditorView) => {
+  const matchingCommands = (v: EditorView): SlashCandidate[] => {
     const { doc, selection } = v.state;
     const text = doc.textContent;
-    if (!latest.current.compactCompletion || !v.editable || v.composing || !v.hasFocus()
+    if (!v.editable || v.composing || !v.hasFocus()
       || doc.childCount !== 1 || !doc.firstChild?.isText || !selection.empty || selection.to !== doc.content.size
       || !text.startsWith('/') || text.includes(' ')) return [];
-    const list = SLASH_COMMANDS.filter((c) => c.cmd !== text && c.cmd.startsWith(text));
-    return list;
+    const out: SlashCandidate[] = [];
+    // 若用户已完整输入内置斜杠命令（如 /compact），除非存在同前缀技能 ID，否则直接放行回车执行内置命令
+    const exactBuiltin = latest.current.compactCompletion && SLASH_COMMANDS.some((c) => c.cmd === text);
+    if (latest.current.compactCompletion && !exactBuiltin) {
+      for (const c of SLASH_COMMANDS) {
+        if (c.cmd.startsWith(text)) {
+          out.push({ kind: 'cmd', key: `cmd:${c.cmd}`, cmd: c.cmd, insert: c.insert, desc: c.desc });
+        }
+      }
+    }
+    const skills = latest.current.skills;
+    if (latest.current.onSelectSkill && skills?.length) {
+      const q = text.slice(1).toLowerCase();
+      const matched = skills
+        .filter((s) => exactBuiltin
+          ? s.id.toLowerCase().startsWith(q)
+          : (!q || s.id.toLowerCase().includes(q) || s.name.toLowerCase().includes(q) || s.description.toLowerCase().includes(q)))
+        .sort((a, b) => Number(b.source === 'workspace') - Number(a.source === 'workspace'));
+      for (const s of matched) {
+        out.push({
+          kind: 'skill',
+          key: `skill:${s.id}`,
+          cmd: `/${s.id}`,
+          skillId: s.id,
+          desc: s.description || s.name,
+          source: s.source,
+        });
+      }
+    }
+    return out;
   };
   const syncCandidates = (v: EditorView) => {
     const list = dismissed.current ? [] : matchingCommands(v);
     setCandidates(list);
     setActiveIdx((prev) => (list.length ? Math.min(prev, list.length - 1) : 0));
   };
-  const complete = (v: EditorView, pick?: typeof SLASH_COMMANDS[number]) => {
+  const complete = (v: EditorView, pick?: SlashCandidate) => {
     const list = matchingCommands(v);
     const chosen = pick ?? list[activeIdxRef.current] ?? list[0];
     if (!chosen) return;
+    if (chosen.kind === 'skill') {
+      v.dispatch(closeHistory(v.state.tr).insertText('', 0, v.state.doc.content.size));
+      latest.current.onSelectSkill?.(chosen.skillId);
+      setCandidates([]);
+      v.focus();
+      return;
+    }
     v.dispatch(closeHistory(v.state.tr).insertText(chosen.insert, 0, v.state.doc.content.size));
     setCandidates([]);
   };
@@ -245,14 +293,14 @@ export default function ComposerEditor(props: ComposerEditorProps) {
       v.dispatch(tr.setSelection(TextSelection.create(tr.doc, at + added.length)));
     }
     syncCandidates(v);
-  }, [props.value, props.attachments, props.disabled, props.placeholder, props.compactCompletion]);
+  }, [props.value, props.attachments, props.disabled, props.placeholder, props.compactCompletion, props.skills]);
 
   return <>
     {candidates.length > 0 && (
-      <div className="slash-menu" role="listbox" aria-label="快捷命令">
+      <div className="slash-menu" role="listbox" aria-label="快捷命令与技能">
         {candidates.map((c, idx) => (
           <button
-            key={c.cmd}
+            key={c.key}
             className={'compact-candidate' + (idx === activeIdx ? ' active' : '')}
             type="button"
             tabIndex={-1}
@@ -260,7 +308,13 @@ export default function ComposerEditor(props: ComposerEditorProps) {
             onMouseDown={(e) => e.preventDefault()}
             onClick={() => { if (editor.current) complete(editor.current, c); }}
           >
-            <strong>{c.cmd}</strong> {c.desc}
+            <strong>{c.cmd}</strong>
+            {c.kind === 'skill' && (
+              <span className={'slash-tag' + (c.source === 'workspace' ? ' workspace' : '')}>
+                {c.source === 'workspace' ? '项目' : '技能'}
+              </span>
+            )}
+            <span className="slash-desc">{c.desc}</span>
           </button>
         ))}
       </div>

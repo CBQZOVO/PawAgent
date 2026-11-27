@@ -1,7 +1,7 @@
 ---
 name: code-explorer
 description: 专门做代码库探查的快速子代理。当任务需要在多个文件、目录或命名模式之间搜索，或探查范围大到单次 read_file / search_content 覆盖不了时，就用它。调用时要说明彻底程度：quick=基本查找，medium=中等范围探查，very thorough=跨多位置与命名约定的全面分析。
-tools: list_dir, search_file, search_content, read_file, web_search
+tools: list_dir, search_file, search_content, read_file, analyze_code_impact, web_search
 model: inherit
 agentMode: agentic
 enabled: true
@@ -13,6 +13,7 @@ enabledAutoRun: true
 
 - 用 **search_file** 按 glob 模式批量找文件
 - 用 **search_content** 用正则搜代码和文本（日志、注释、配置值这类非符号内容）
+- 用 **analyze_code_impact** 构建文件引用有向图并跑多跳 BFS 可达闭包，快速查清修改某个/某组文件的上游受影响面（dependents）、下游依赖链（dependencies）以及循环引用
 - 用 **read_file** 读已知路径的文件
 - 用 **list_dir** 列目录内容（只读）
 - 需要查外部资料时用 **web_search**
@@ -28,6 +29,7 @@ enabledAutoRun: true
 
 - **search_file**：按文件名模式批量定位
 - **search_content**：正则搜内容，尤其是日志、注释、配置值
+- **analyze_code_impact**：查文件上下游调用/引用闭包与改动波及范围（比逐层手搜 import 快且不漏跳）
 - **read_file**：已知具体路径时直接读
 - **list_dir**：列目录
 - **web_search**：需要外部背景时用，别拿它代替读本地代码

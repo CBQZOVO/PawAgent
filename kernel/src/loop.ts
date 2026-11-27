@@ -15,6 +15,7 @@ import { compactMessages } from './context.js';
 import { isConversationHistory, prepareSessionContext } from './session-context.js';
 import { pruneToolResult } from './prune.js';
 import { AsyncQueue } from './queue.js';
+import { scheduleToolBatches, type ToolResourceAccess } from './dag.js';
 
 const DEFAULT_MAX_ROUNDS = Math.max(4, Number(process.env.PAW_MAX_ROUNDS) || 200);
 const REPEAT_REMIND_AT = [3, 5, 8];
@@ -287,11 +288,15 @@ export async function* runAgent(params: RunAgentParams): AsyncGenerator<AgentEve
 
     const todoCall = [...parsed].reverse().find((p) => p.call.name === 'todo_write' && !p.bad);
     if (todoCall && Array.isArray(todoCall.args.todos)) {
-      lastTodos = (todoCall.args.todos as { content?: unknown; status?: unknown }[])
+      lastTodos = (todoCall.args.todos as { id?: unknown; content?: unknown; status?: unknown; dependsOn?: unknown }[])
         .filter((t) => typeof t?.content === 'string')
         .map((t) => ({
+          ...(typeof t.id === 'string' && t.id.trim() ? { id: t.id.trim() } : {}),
           content: String(t.content),
           status: (t.status === 'in_progress' || t.status === 'completed' ? t.status : 'pending') as TodoItem['status'],
+          ...(Array.isArray(t.dependsOn)
+            ? { dependsOn: t.dependsOn.filter((d): d is string => typeof d === 'string' && !!d.trim()) }
+            : {}),
         }));
     }
 
@@ -344,16 +349,22 @@ export async function* runAgent(params: RunAgentParams): AsyncGenerator<AgentEve
     const runnableCalls = parsed.filter((p) => !results.has(p.call.id));
     const roundReads = runnableCalls.filter((p) => isPrunable(p.call.name)).length;
 
-    for (let i = 0; i < runnableCalls.length;) {
-      if (signal?.aborted) return;
-      const first = runnableCalls[i];
+    // 根据每个工具的读写资源集合（Bernstein 冲突条件）构建因果 DAG 并切成并发波次：
+    // - 宿主若提供 getResourceAccess（如 server 端按文件路径区分），不同文件的 edit_file / write_file 会自动合并到同一波并行；
+    // - 未提供时退化为安全保守策略：只读工具共用只读池，写工具作为全局写屏障（writes: ['*']）独占串行。
+    const classifyAccess = (name: string, args: Record<string, unknown>): ToolResourceAccess => {
+      if (tools.getResourceAccess) return tools.getResourceAccess(name, args);
+      if (name === 'subagent') return { lane: 'subagent', reads: ['*'], writes: [] };
+      if (isReadOnly(name)) return { lane: 'normal', reads: ['*'], writes: [] };
+      return { lane: 'normal', reads: ['*'], writes: ['*'] };
+    };
+    const scheduledBatches = scheduleToolBatches(runnableCalls, (p) => classifyAccess(p.call.name, p.args));
 
-      if (first.call.name === 'subagent') {
-        const subBatch: typeof runnableCalls = [first];
-        while (i + subBatch.length < runnableCalls.length && runnableCalls[i + subBatch.length].call.name === 'subagent') {
-          subBatch.push(runnableCalls[i + subBatch.length]);
-        }
-        i += subBatch.length;
+    for (const scheduled of scheduledBatches) {
+      if (signal?.aborted) return;
+
+      if (scheduled.lane === 'subagent') {
+        const subBatch = scheduled.items;
         const queue = new AsyncQueue<AgentEvent>();
         let cursor = 0;
         const launch = async (p: typeof parsed[number]) => {
@@ -401,14 +412,7 @@ export async function* runAgent(params: RunAgentParams): AsyncGenerator<AgentEve
         continue;
       }
 
-      const batch: typeof runnableCalls = [first];
-      if (isReadOnly(first.call.name)) {
-        while (i + batch.length < runnableCalls.length && isReadOnly(runnableCalls[i + batch.length].call.name)) {
-          batch.push(runnableCalls[i + batch.length]);
-        }
-      }
-      i += batch.length;
-
+      const batch = scheduled.items;
       for (const p of batch) {
         yield {
           type: 'tool_start',

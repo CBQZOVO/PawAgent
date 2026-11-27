@@ -253,17 +253,24 @@ export default function ToolCard({ tool, members, busy, stopped, onOpenSession, 
         {todoOpen && (
           <div className="todo-body">
             <div className="todo-progress"><div className="todo-progress-fill" style={{ width: `${pct}%` }} /></div>
-            {todos.map((t, i) => (
-              <div key={i} className={'todo-item ' + (t.status || 'pending')}>
-                {t.status === 'completed' ? <Check size={13} className="todo-check" />
-                  : t.status === 'in_progress'
-                    ? (busy
-                      ? <span className="todo-doing"><LoadingDots /></span>
-                      : <span className="todo-stalled" title="这轮已经结束，这一项没有收尾"><Circle size={11} /></span>)
-                    : <Circle size={11} className="todo-pending" />}
-                <span>{t.content}</span>
-              </div>
-            ))}
+            {todos.map((t, i) => {
+              const item = t as { id?: string; content?: string; status?: string; dependsOn?: string[] };
+              return (
+                <div key={i} className={'todo-item ' + (item.status || 'pending')}>
+                  {item.status === 'completed' ? <Check size={13} className="todo-check" />
+                    : item.status === 'in_progress'
+                      ? (busy
+                        ? <span className="todo-doing"><LoadingDots /></span>
+                        : <span className="todo-stalled" title="这轮已经结束，这一项没有收尾"><Circle size={11} /></span>)
+                      : <Circle size={11} className="todo-pending" />}
+                  <span>
+                    {item.id ? `[${item.id}] ` : ''}
+                    {item.content}
+                    {item.dependsOn?.length ? ` (依赖: ${item.dependsOn.join(', ')})` : ''}
+                  </span>
+                </div>
+              );
+            })}
           </div>
         )}
       </div>

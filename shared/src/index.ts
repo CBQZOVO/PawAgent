@@ -43,7 +43,7 @@ export interface ToolResult {
 export type PermissionDecision = 'allow_once' | 'deny' | 'allow_session' | 'deny_session';
 
 export interface SessionPermission {
-  mode: 'default' | 'strict';
+  mode: 'default' | 'strict' | 'plan';
   allow: string[];
   deny: string[];
 }
@@ -94,6 +94,10 @@ export function toolStepSummary(
     case 'git_log': return '查看提交记录';
     case 'web_search': return one(a.query) ? `搜索 ${one(a.query)}` : '网页搜索';
     case 'search_parent_session': return one(a.query) ? `回查原会话：${one(a.query)}` : '回查原会话记录';
+    case 'analyze_code_impact': {
+      const target = Array.isArray(a.target) ? a.target.map(fileLabel).filter(Boolean).join(', ') : fileLabel(a.target);
+      return target ? `分析影响面 ${target}` : '分析代码影响面';
+    }
     default: return name;
   }
 }
@@ -245,6 +249,12 @@ export interface HandoffLink {
   title: string;
 }
 
+export interface ForkLink {
+  sessionId: string;
+  messageId: string;
+  ts: number;
+}
+
 /** 会话交接单：挂在新会话待发送草稿及首条 user 消息上，前端渲染折叠卡片，后端注入 <handoff_context> */
 export interface HandoffContext {
   fromSessionId: string;
@@ -350,8 +360,10 @@ export interface ToolView {
 
 /** todo_write 的任务清单条目（对标 Qoder TodoWrite / dsh todo_write） */
 export interface TodoItem {
+  id?: string;
   content: string;
   status: 'pending' | 'in_progress' | 'completed';
+  dependsOn?: string[];
 }
 
 /**
@@ -667,6 +679,7 @@ export interface Session {
   parentId?: string;    // 子代理会话：父会话 id（侧栏不显示，只从子代理卡片进）
   handoffFrom?: HandoffLink; // 交接来源会话（顶栏显示「← 承接自」快捷跳转）
   handoffTo?: HandoffLink;   // 已交接至哪个新会话（原会话底部显示跳转提示）
+  forkFrom?: ForkLink;       // 分叉来源会话及基线消息/时间戳
   permission?: SessionPermission; // 按会话的工具权限配置（默认 default 不拦截）
 }
 
@@ -682,6 +695,7 @@ export interface SessionSummary {
   parentId?: string;
   handoffFrom?: HandoffLink;
   handoffTo?: HandoffLink;
+  forkFrom?: ForkLink;
   permission?: SessionPermission;
 }
 

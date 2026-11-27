@@ -255,6 +255,7 @@ await atest('内置 code-explorer 定义可加载，白名单不含 subagent/run
   const ce = defs.find((d) => d.name === 'code-explorer');
   assert.ok(ce, '应有内置 code-explorer');
   assert.ok(ce!.tools.includes('search_content'));
+  assert.ok(ce!.tools.includes('analyze_code_impact'));
   assert.ok(!ce!.tools.includes('subagent'), '不能递归');
   assert.ok(!ce!.tools.includes('run_command'), '只读子代理不给 shell');
 });

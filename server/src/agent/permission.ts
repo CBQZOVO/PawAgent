@@ -1,9 +1,34 @@
-// 按会话工具权限鉴权与审批挂起管理（strict 模式 fail-closed，run_command 禁整工具级会话放行）
+// 按会话工具权限鉴权与审批挂起管理：
+// 基于 @paw/kernel 的一阶谓词规则表（DEFAULT_PERMISSION_RULES）+ 全称谓词 Shell 只读验证器，
+// 支持 default / strict / plan 三种模式及权限配置冲突检查；run_command 保持三重会话放行护栏。
 import { randomUUID } from 'node:crypto';
 import type { PermissionDecision, SessionPermission } from '@paw/shared';
-import type { ToolExecutionContext, ToolRuntime } from '@paw/kernel';
+import {
+  analyzeShellReadOnly,
+  DEFAULT_PERMISSION_RULES,
+  detectPermissionConflicts,
+  evaluatePermissionPolicy,
+  EXPLICIT_DENY_REASON,
+  isSafeReadOnlyShellCommand,
+  PLAN_MODE_DENY_REASON,
+  verifyPolicyRuleTable,
+  type PolicyVerdict,
+  type ToolExecutionContext,
+  type ToolRuntime,
+} from '@paw/kernel';
 import { pawPlugins } from '../plugins/index.js';
+import { isMcpToolReadOnly } from '../mcp.js';
 import { parseSessionPermission, updateSessionPermission } from '../db.js';
+
+export {
+  analyzeShellReadOnly,
+  DEFAULT_PERMISSION_RULES,
+  detectPermissionConflicts,
+  EXPLICIT_DENY_REASON,
+  isSafeReadOnlyShellCommand,
+  PLAN_MODE_DENY_REASON,
+  verifyPolicyRuleTable,
+};
 
 /** 内部控制类工具不弹确认卡（subagent 内部工具执行会继承父会话 authorize） */
 const INTERNAL_SAFE_TOOLS = new Set(['todo_write', 'ask_user', 'structured_output', 'subagent']);
@@ -18,19 +43,39 @@ export function normalizePermission(raw?: SessionPermission): SessionPermission 
   return parseSessionPermission(raw) ?? defaultPermission();
 }
 
+/**
+ * 返回某次工具调用的完整权限裁决（含命中的规则 ID 与拒绝提示文案）。
+ * 流程：收集当前工具的客观属性（是否内置安全、是否插件/MCP 只读、是否 GET 类 API、
+ *       是否通过全称谓词检验的只读 Shell），交给 @paw/kernel 的声明式规则表统一裁决。
+ */
+export function evaluateToolPermissionVerdict(
+  name: string,
+  args: Record<string, unknown>,
+  permission: SessionPermission,
+): PolicyVerdict {
+  const isReadOnlyShell = name === 'run_command'
+    && typeof args.cmd === 'string'
+    && isSafeReadOnlyShellCommand(args.cmd);
+
+  return evaluatePermissionPolicy({
+    tool: name,
+    args,
+    permission,
+    isInternalSafe: INTERNAL_SAFE_TOOLS.has(name),
+    isPluginReadOnly: pawPlugins.isReadOnly(name),
+    isMcpReadOnly: isMcpToolReadOnly(name),
+    isMutatingApi: name === 'call_api' ? pawPlugins.isMutating('call_api', args) : true,
+    isReadOnlyShell,
+  });
+}
+
+/** 简化入口：只返回裁决动作（'allow' | 'deny' | 'ask'），兼容既有调用方 */
 export function evaluateToolPermission(
   name: string,
   args: Record<string, unknown>,
   permission: SessionPermission,
 ): 'allow' | 'deny' | 'ask' {
-  if (permission.mode !== 'strict') return 'allow';
-  if (permission.deny.includes(name)) return 'deny';
-  if (name !== 'run_command' && permission.allow.includes(name)) return 'allow';
-  if (INTERNAL_SAFE_TOOLS.has(name)) return 'allow';
-  if (pawPlugins.isReadOnly(name)) return 'allow';
-  if (name === 'call_api' && !pawPlugins.isMutating('call_api', args)) return 'allow';
-  // Fail-closed：所有 mutating 工具、未显式声明 readOnly 的 MCP 工具与外置插件工具默认走确认
-  return 'ask';
+  return evaluateToolPermissionVerdict(name, args, permission).effect;
 }
 
 export function formatApprovalPrompt(name: string, args: Record<string, unknown>): { title: string; detail: string } {
@@ -148,10 +193,14 @@ export function createSessionAuthorizer(opts: {
     toolCallId: string,
     ctx: ToolExecutionContext,
   ) => {
-    const verdict = evaluateToolPermission(name, args, current);
-    if (verdict === 'allow') return { decision: 'allow' as const };
-    if (verdict === 'deny') {
-      return { decision: 'deny' as const, reason: '该工具在本会话已被设为禁止', rejectedByUser: true };
+    const verdict = evaluateToolPermissionVerdict(name, args, current);
+    if (verdict.effect === 'allow') return { decision: 'allow' as const };
+    if (verdict.effect === 'deny') {
+      return {
+        decision: 'deny' as const,
+        reason: verdict.reason || EXPLICIT_DENY_REASON,
+        rejectedByUser: true,
+      };
     }
 
     // 子代理或无人值守模式绝不弹确认卡，直接拒绝以防卡死或绕过 strict

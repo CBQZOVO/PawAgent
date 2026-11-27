@@ -9,3 +9,6 @@ export * from './agents.js';
 export * from './subagent.js';
 export * from './loop.js';
 export * from './plugin.js';
+export * from './fork-tree.js';
+export * from './policy.js';
+export * from './dag.js';

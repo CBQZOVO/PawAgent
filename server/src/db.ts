@@ -91,8 +91,8 @@ function migrateLegacyError(m: ViewMessage): ViewMessage {
   return { ...m, content, error: friendlyGatewayError(502, match[1].replace(/^gateway (\d+): /, '')) };
 }
 
-/** 会话归属元数据（workspace/source/taskId/runId/handoffFrom/handoffTo/permission），单独存 JSON 方便扩展 */
-type SessionMeta = Pick<Session, 'workspace' | 'source' | 'taskId' | 'runId' | 'parentId' | 'handoffFrom' | 'handoffTo' | 'permission'>;
+/** 会话归属元数据（workspace/source/taskId/runId/handoffFrom/handoffTo/forkFrom/permission），单独存 JSON 方便扩展 */
+type SessionMeta = Pick<Session, 'workspace' | 'source' | 'taskId' | 'runId' | 'parentId' | 'handoffFrom' | 'handoffTo' | 'forkFrom' | 'permission'>;
 interface SessionRow {
   id: string;
   title: string;
@@ -108,10 +108,20 @@ function parseHandoffLink(raw: unknown): Session['handoffFrom'] {
   return { sessionId: r.sessionId, title: typeof r.title === 'string' && r.title ? r.title : '原会话' };
 }
 
+/** 校验并归一化会话分叉来源指针（任一必需字段非法则返回 undefined，兼容旧库数据） */
+function parseForkLink(raw: unknown): Session['forkFrom'] {
+  if (!raw || typeof raw !== 'object') return undefined;
+  const r = raw as { sessionId?: unknown; messageId?: unknown; ts?: unknown };
+  if (typeof r.sessionId !== 'string' || !r.sessionId.trim()) return undefined;
+  if (typeof r.messageId !== 'string' || !r.messageId.trim()) return undefined;
+  if (typeof r.ts !== 'number' || !Number.isFinite(r.ts)) return undefined;
+  return { sessionId: r.sessionId, messageId: r.messageId, ts: r.ts };
+}
+
 export function parseSessionPermission(raw: unknown): SessionPermission | undefined {
   if (!raw || typeof raw !== 'object') return undefined;
   const r = raw as { mode?: unknown; allow?: unknown; deny?: unknown };
-  if (r.mode !== 'default' && r.mode !== 'strict') return undefined;
+  if (r.mode !== 'default' && r.mode !== 'strict' && r.mode !== 'plan') return undefined;
   const clean = (arr: unknown) =>
     Array.isArray(arr) ? [...new Set(arr.filter((x): x is string => typeof x === 'string' && !!x.trim()))] : [];
   // run_command 禁止整工具级会话放行
@@ -125,6 +135,7 @@ function parseSessionMeta(raw: string | null): SessionMeta {
     const m = JSON.parse(raw || '{}') as SessionMeta;
     const handoffFrom = parseHandoffLink(m.handoffFrom);
     const handoffTo = parseHandoffLink(m.handoffTo);
+    const forkFrom = parseForkLink(m.forkFrom);
     const permission = parseSessionPermission(m.permission);
     return {
       ...(typeof m.workspace === 'string' && m.workspace ? { workspace: m.workspace } : {}),
@@ -134,6 +145,7 @@ function parseSessionMeta(raw: string | null): SessionMeta {
       ...(typeof m.parentId === 'string' && m.parentId ? { parentId: m.parentId } : {}),
       ...(handoffFrom ? { handoffFrom } : {}),
       ...(handoffTo ? { handoffTo } : {}),
+      ...(forkFrom ? { forkFrom } : {}),
       ...(permission ? { permission } : {}),
     };
   } catch { return {}; }
@@ -258,6 +270,7 @@ function serializeSessionMeta(s: SessionMeta): string {
     parentId: s.parentId,
     handoffFrom: s.handoffFrom,
     handoffTo: s.handoffTo,
+    forkFrom: s.forkFrom ? parseForkLink(s.forkFrom) : undefined,
     permission: s.permission ? parseSessionPermission(s.permission) : undefined,
   });
 }

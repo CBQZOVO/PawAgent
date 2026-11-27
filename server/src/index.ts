@@ -19,16 +19,19 @@ import { reflectTurn } from './reflection.js';
 import {
   addContextSample, clearSessions, deleteSession, getContextReading, getContextSamples,
   getSession, listSessionSummaries, listTurnTraces, parseSessionPermission,
-  searchSessions, updateSessionPermission, upsertSessions, upsertTurnTrace,
+  searchSessions, updateSessionPermission, upsertSession, upsertSessions, upsertTurnTrace,
 } from './db.js';
 import { isConversationHistory, prepareSessionContext } from './agent/session-context.js';
 import { generateHandoffBrief } from './agent/handoff.js';
 import { loadPersonaPrompt } from './persona.js';
 import { runAgent } from './agent/loop.js';
-import { cancelPendingApprovals, createSessionAuthorizer, hasPendingApproval, resolveApproval } from './agent/permission.js';
+import { cancelPendingApprovals, createSessionAuthorizer, detectPermissionConflicts, hasPendingApproval, resolveApproval } from './agent/permission.js';
 import type { GatewayConfig } from './gateway/client.js';
 import { loadSkillContent, loadSkills, SKILLS_DIR } from './skills.js';
-import { initMcp, mcpServerNames, mcpServerViews, mcpToolSchemas } from './mcp.js';
+import {
+  deleteMcpServer, importMcpServers, initMcp, mcpServerNames, mcpServerViews, mcpToolSchemas,
+  reconnectMcpServer, reloadMcp, upsertMcpServer, type McpServerConfig,
+} from './mcp.js';
 import {
   getConnectionAuthProvider,
   getConnectionSsoProvider,
@@ -65,7 +68,10 @@ import { addRun, deleteTask, getTask, listRuns, listTasks, touchTask, upsertTask
 import { composeChatMessages } from './chat-input.js';
 import { listSessionAttachments, persistAttachments } from './attachments.js';
 import { generateTitle } from './title.js';
-import { rollbackAfter } from './snapshots.js';
+import {
+  clearSnapshots, deleteSnapshots, forkSnapshotRecords,
+  getLatestSnapshotTs, revertWorkspaceTo, rollbackAfter, switchSessionWorkspace,
+} from './snapshots.js';
 import { runTask, startScheduler } from './scheduler.js';
 import { loadSearchConfig, saveSearchProvider, type SearchProviderName } from './tools/web-search.js';
 import { DATA_DIR } from './paths.js';
@@ -308,11 +314,63 @@ app.post('/api/workspace/pick', async (c) => {
   }
 });
 
-app.get('/api/mcp', (c) => c.json({
+const mcpSnapshot = () => ({
   servers: mcpServerNames(), // 兼容旧调用方：已连接的名字
-  views: mcpServerViews(),   // 所有配置项，含连接失败
+  views: mcpServerViews(),   // 所有配置项，含连接失败与可编辑 config
   tools: mcpToolSchemas().map((t) => ({ name: t.name, description: t.description })),
-}));
+});
+
+app.get('/api/mcp', (c) => c.json(mcpSnapshot()));
+
+app.post('/api/mcp', async (c) => {
+  const body = await c.req.json<{ name?: string; config?: Partial<McpServerConfig>; originalName?: string }>().catch(() => null);
+  if (!body || !body.config) return c.json({ error: '请求体缺少 name 或 config' }, 400);
+  try {
+    const view = await upsertMcpServer(body.name || '', body.config, body.originalName);
+    return c.json({ ok: true, view, ...mcpSnapshot() });
+  } catch (e) {
+    return c.json({ error: (e as Error).message }, 400);
+  }
+});
+
+app.delete('/api/mcp/:name', async (c) => {
+  try {
+    await deleteMcpServer(c.req.param('name'));
+    return c.json({ ok: true, ...mcpSnapshot() });
+  } catch (e) {
+    return c.json({ error: (e as Error).message }, 400);
+  }
+});
+
+app.post('/api/mcp/:name/reconnect', async (c) => {
+  try {
+    const view = await reconnectMcpServer(c.req.param('name'));
+    return c.json({ ok: true, view, ...mcpSnapshot() });
+  } catch (e) {
+    return c.json({ error: (e as Error).message }, 400);
+  }
+});
+
+app.post('/api/mcp/import', async (c) => {
+  const body = await c.req.json<{ mcpServers?: Record<string, Partial<McpServerConfig>> } | Record<string, Partial<McpServerConfig>>>().catch(() => null);
+  if (!body || typeof body !== 'object' || Array.isArray(body)) {
+    return c.json({ error: '请求体必须是合法 JSON 对象' }, 400);
+  }
+  const map = ('mcpServers' in body && body.mcpServers && typeof body.mcpServers === 'object' && !Array.isArray(body.mcpServers))
+    ? (body.mcpServers as Record<string, Partial<McpServerConfig>>)
+    : (body as Record<string, Partial<McpServerConfig>>);
+  try {
+    const imported = await importMcpServers(map);
+    return c.json({ ok: true, imported: imported.length, ...mcpSnapshot() });
+  } catch (e) {
+    return c.json({ error: (e as Error).message }, 400);
+  }
+});
+
+app.post('/api/mcp/reload', async (c) => {
+  await reloadMcp();
+  return c.json({ ok: true, ...mcpSnapshot() });
+});
 
 // ---------------------------------------------------------------- 系统连接
 // 连接定义落 ~/.paw/connections.json，密钥单独进钥匙串（永远不回传给前端）。
@@ -447,12 +505,14 @@ app.get('/api/sessions/search', (c) => {
 app.get('/api/sessions/:id/export', (c) => {
   const s = getSession(c.req.param('id'));
   if (!s) return c.json({ error: 'not found' }, 404);
+  // 跨机导出剔除本机分叉指针 forkFrom，避免导入异机形成悬空父会话引用
+  const { forkFrom: _omitFork, ...exportable } = s;
   const safeTitle = (s.title || 'session').replace(/[\\/:*?"<>|\s]+/g, '-').slice(0, 32) || 'session';
   const day = new Date().toISOString().slice(0, 10);
   const filename = `paw-session-${safeTitle}-${day}.json`;
   c.header('Content-Type', 'application/json; charset=utf-8');
   c.header('Content-Disposition', `attachment; filename*=UTF-8''${encodeURIComponent(filename)}`);
-  return c.body(JSON.stringify(s, null, 2));
+  return c.body(JSON.stringify(exportable, null, 2));
 });
 const MAX_IMPORT_BYTES = 20 * 1024 * 1024;
 const MAX_IMPORT_SESSIONS = 200;
@@ -552,9 +612,94 @@ app.patch('/api/sessions/:id/permission', async (c) => {
   const body = await c.req.json<{ permission?: SessionPermission }>().catch(() => null);
   const clean = parseSessionPermission(body?.permission);
   if (!clean) return c.json({ ok: false, error: '无效的权限配置' }, 400);
+  const conflicts = detectPermissionConflicts(body?.permission ?? clean);
   const updated = updateSessionPermission(id, clean);
   if (!updated) return c.json({ ok: false, error: '会话不存在' }, 404);
-  return c.json({ ok: true, permission: updated });
+  return c.json({ ok: true, permission: updated, conflicts });
+});
+/**
+ * 从指定历史消息创建会话分叉（非破坏性）：
+ *   1. 原会话消息与快照完整保留，新会话截断到选中消息为止并写入 forkFrom 指针；
+ *   2. 计算工作区文件回退基线 baselineTs：
+ *      - 选中 user 消息：退回到该 user 消息发送前（撤销它触发的那一轮及之后改动）；
+ *      - 选中中间某条 assistant 消息：退回到下一条消息开始前（保留该轮刚做完的改动）；
+ *      - 选中最后一条 assistant 消息：保留当前全部工作区改动，不回退，只把基线设为最新快照时间；
+ *   3. 拷贝 <= baselineTs 的历史快照给新分支，供以后跨分叉切换（LCA）时使用。
+ */
+app.post('/api/sessions/:id/fork', async (c) => {
+  const id = c.req.param('id');
+  const source = getSession(id);
+  if (!source) return c.json({ ok: false, error: '会话不存在' }, 404);
+  if (source.parentId || source.source === 'subagent') {
+    return c.json({ ok: false, error: '子代理内部会话不支持分叉' }, 400);
+  }
+  if (activeSteerQueues.has(id) || hasPendingApproval(id)) {
+    return c.json({ ok: false, error: '会话正在运行或存在未决审批，请先停止或处理后再分叉' }, 409);
+  }
+  const body = await c.req.json<{ messageId?: string; title?: string }>().catch(() => null);
+  const messageId = String(body?.messageId || '').trim();
+  if (!messageId) return c.json({ ok: false, error: 'messageId 必填' }, 400);
+  const idx = source.messages.findIndex((m) => m.id === messageId);
+  if (idx < 0) return c.json({ ok: false, error: '未在该会话中找到指定消息' }, 404);
+
+  const selected = source.messages[idx];
+  const isLastAssistant = selected.role === 'assistant' && idx === source.messages.length - 1;
+  const baselineTs = selected.role === 'user'
+    ? selected.ts
+    : !isLastAssistant
+      ? Math.max(selected.ts, source.messages[idx + 1].ts)
+      : Math.max(Date.now(), await getLatestSnapshotTs(id));
+
+  const revertRes = isLastAssistant
+    ? { restored: [] as string[], skipped: [] as string[] }
+    : await revertWorkspaceTo(id, baselineTs);
+
+  const forkId = randomUUID();
+  await forkSnapshotRecords(id, forkId, baselineTs);
+
+  const now = Date.now();
+  const forkTitle = typeof body?.title === 'string' && body.title.trim()
+    ? body.title.trim().slice(0, 64)
+    : `${source.title || '未命名会话'}（分叉）`;
+  const forkFrom = { sessionId: id, messageId, ts: baselineTs };
+  const forked: Session = {
+    id: forkId,
+    title: forkTitle,
+    messages: source.messages.slice(0, idx + 1),
+    updatedAt: now,
+    ...(source.workspace ? { workspace: source.workspace } : {}),
+    ...(source.source ? { source: source.source } : {}),
+    ...(source.taskId ? { taskId: source.taskId } : {}),
+    ...(source.permission ? { permission: source.permission } : {}),
+    forkFrom,
+  };
+  upsertSession(forked);
+  const summary: SessionSummary = {
+    id: forked.id,
+    title: forked.title,
+    updatedAt: forked.updatedAt,
+    ...(forked.workspace ? { workspace: forked.workspace } : {}),
+    ...(forked.source ? { source: forked.source } : {}),
+    ...(forked.taskId ? { taskId: forked.taskId } : {}),
+    ...(forked.permission ? { permission: forked.permission } : {}),
+    forkFrom,
+  };
+  return c.json({ ok: true, session: summary, restored: revertRes.restored, skipped: revertRes.skipped });
+});
+/**
+ * 跨同源分叉切换工作区文件状态：
+ * 前端从会话 fromSessionId 切到目标会话 :id 时调用，服务端通过分叉树 LCA 自动撤销源分支独有改动并重放目标分支改动。
+ */
+app.post('/api/sessions/:id/switch', async (c) => {
+  const toId = c.req.param('id');
+  const body = await c.req.json<{ fromSessionId?: string }>().catch(() => null);
+  const fromId = String(body?.fromSessionId || '').trim();
+  if (!fromId) return c.json({ ok: false, error: 'fromSessionId 必填' }, 400);
+  if (activeSteerQueues.has(fromId) || activeSteerQueues.has(toId) || hasPendingApproval(fromId) || hasPendingApproval(toId)) {
+    return c.json({ ok: false, error: '源或目标会话正在运行中，无法切换分支工作区状态' }, 409);
+  }
+  const res = await switchSessionWorkspace(fromId, toId, (sid) => getSession(sid));
+  return c.json({ ok: true, ...res });
 });
 app.get('/api/traces/:sessionId', (c) => {
   return c.json({ traces: listTurnTraces(c.req.param('sessionId')) });
@@ -573,11 +718,13 @@ app.delete('/api/sessions/:id', (c) => {
   const id = c.req.param('id');
   cancelPendingApprovals(id, '会话已删除');
   deleteSession(id);
+  void deleteSnapshots(id);
   return c.json({ ok: true });
 });
 app.delete('/api/sessions', (c) => {
   cancelPendingApprovals(undefined, '会话已清空');
   clearSessions();
+  void clearSnapshots();
   return c.json({ ok: true });
 });
 /** 回滚文件：把 beforeTs 之后 AI 改过的文件还原。「编辑消息并重发」前调用。 */
@@ -627,14 +774,18 @@ app.post('/api/search-config', async (c) => {
 
 // 定时任务 API
 app.get('/api/skills', async (c) => {
-  const skills = await loadSkills();
+  const wsParam = c.req.query('workspace');
+  const workspace = wsParam === undefined ? undefined : (wsParam || null);
+  const skills = await loadSkills(workspace);
   return c.json({
-    skills: skills.map((s) => ({ id: s.dir, name: s.name, description: s.description })),
+    skills: skills.map((s) => ({ id: s.dir, name: s.name, description: s.description, source: s.source })),
     dir: SKILLS_DIR,
   });
 });
 app.get('/api/skills/:id/content', async (c) => {
-  const content = await loadSkillContent(c.req.param('id'));
+  const wsParam = c.req.query('workspace');
+  const workspace = wsParam === undefined ? undefined : (wsParam || null);
+  const content = await loadSkillContent(c.req.param('id'), workspace);
   return content ? c.json({ content }) : c.json({ error: 'not found' }, 404);
 });
 
@@ -831,8 +982,9 @@ app.post('/api/chat/steer', async (c) => {
     parts.push(attDesc);
   }
   if (body.skillIds?.length) {
+    const steerWorkspace = getSession(sid)?.workspace;
     for (const id of body.skillIds) {
-      const content = await loadSkillContent(id);
+      const content = await loadSkillContent(id, steerWorkspace);
       if (content) parts.push(`<skill id="${id}">\n${content}\n</skill>`);
     }
   }
@@ -966,7 +1118,7 @@ app.post('/api/chat', (c) => {
     // 技能加载：发 UI 事件 + 收集全文；正文注入统一交给 composeChatMessages
     const skillBlocks: { id: string; content: string }[] = [];
     for (const id of body.skillIds || []) {
-      const content = await loadSkillContent(id);
+      const content = await loadSkillContent(id, workspace);
       if (!content) continue;
       skillBlocks.push({ id, content });
       const sid = `skill-${id}-${Date.now()}`;
@@ -1095,6 +1247,9 @@ app.post('/api/chat', (c) => {
         rawHistory: body.messages,
         drainSteering: () => (steerQ.length ? steerQ.splice(0).map((e) => e.text) : []),
         authorize,
+        extraSystemNote: sessionPermission?.mode === 'plan'
+          ? '[只读计划模式约束] 当前会话处于只读计划模式（plan）：禁止修改、创建或删除文件，禁止 git 提交或运行任何带副作用的命令。请仅使用只读工具（及纯只读查询命令）完成调研，并直接输出结构清晰的实施计划。'
+          : undefined,
       })) {
         if (abortCtrl.signal.aborted) break;
         if (ev.type === 'text') {
