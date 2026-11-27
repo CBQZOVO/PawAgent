@@ -71,6 +71,17 @@ const EVIDENCE_RULES = [
   '</evidence_discipline>',
 ].join('\n');
 
+/** 工程原则：写代码/给方案的取舍标准；独立于人设文件，换人设也生效。 */
+const ENGINEERING_PRINCIPLES = [
+  '<engineering_principles>',
+  '1. 把简单的事儿做得比谁都干净，是最关键的标准。',
+  '2. 写代码/给方案：默认选最稳定的，不选最花哨的。不追最优解，追各种异常情况下都不出错的解。',
+  '3. 加任何复杂性（新依赖、新架构、抽象层、精妙技巧）之前，先论证必要性——复杂性本身就是风险，不是加分项。',
+  '4. 宁可朴素到「这不就是普通写法吗」，也不要精致到「出问题时没人看得懂」。',
+  '5. 提交代码时，分类改动类型（如 feat/fix/docs/refactor），写清楚改动内容。',
+  '</engineering_principles>',
+].join('\n');
+
 /** 执行手册：教模型怎么选工具、怎么失败、怎么收尾；独立于人设文件。 */
 const EXECUTION_PLAYBOOK = [
   '<execution_playbook>',
@@ -130,6 +141,8 @@ export async function loadPersonaPrompt(workspace?: string | null): Promise<stri
     '<system-reminder data-role="user-context">',
     ...identitySection,
     EVIDENCE_RULES,
+    '',
+    ENGINEERING_PRINCIPLES,
     '',
     OUTPUT_RULES,
     '',
