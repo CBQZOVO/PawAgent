@@ -10,6 +10,7 @@ export const corePlugin: PawPlugin<ServerToolExecCtx> = {
   tools: [
     {
       schema: TODO_TOOL_SCHEMA,
+      meta: { readOnly: true },
       execute: (args) => executeTodoWrite(args),
     },
     ...SKILL_TOOL_SCHEMAS.map((schema) => ({

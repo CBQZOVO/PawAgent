@@ -86,6 +86,7 @@ export function toolStepSummary(
     case 'search_file': return one(a.pattern) ? `查找 ${one(a.pattern)}` : '搜索文件';
     case 'search_content': return one(a.pattern) ? `搜索 ${one(a.pattern)}` : '搜索内容';
     case 'web_fetch': return one(a.url) ? `读取网页 ${one(a.url)}` : '读取网页';
+    case 'open_browser': return one(a.url) ? `打开网页 ${one(a.url)}` : '打开内置浏览器';
     case 'run_command': return one(a.cmd) || '执行命令';
     case 'generate_image': return '生成图片';
     case 'git_status': return '查看仓库状态';

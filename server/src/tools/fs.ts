@@ -23,7 +23,8 @@ const MAX_ENTRIES = 500;      // list_dir 条目上限
 const MAX_FILES = 20000;      // search_file / search_content 遍历文件上限
 const MAX_HITS = 200;         // search_content 命中上限
 const MAX_LINE_LEN = 400;     // 命中行截断
-const MAX_FILE_BYTES = 2 * 1024 * 1024; // 超过 2MB 的文件不搜内容（多半是产物/数据）
+const MAX_FILE_BYTES = 2 * 1024 * 1024; // 目录递归搜索跳过 >2MB 的大产物文件
+const MAX_SINGLE_FILE_BYTES = 64 * 1024 * 1024; // 显式指定单文件（如 .log/.txt）放宽至 64MB
 const SEARCH_CONCURRENCY = 16;
 
 export const FS_TOOL_SCHEMAS: ToolSchema[] = [
@@ -54,7 +55,7 @@ export const FS_TOOL_SCHEMAS: ToolSchema[] = [
   },
   {
     name: 'search_content',
-    description: 'Search file contents by regex (read-only). Returns "absolutePath:lineNo: line" hits, max 200. Skips node_modules/.git and binary/large files.',
+    description: 'Search file contents by regex (read-only). Supports directories (skips >2MB/binary) and explicit single log/text files up to 64MB. Set context_lines (1-10) to include surrounding lines (like grep -C) so stacktraces/logs need no extra read_file.',
     parameters: {
       type: 'object',
       properties: {
@@ -62,6 +63,7 @@ export const FS_TOOL_SCHEMAS: ToolSchema[] = [
         path: { type: 'string', description: 'Root directory or single file to search (absolute, or relative to workspace root). Defaults to workspace root' },
         glob: { type: 'string', description: 'Optional filename glob filter, e.g. "*.ts"' },
         case_sensitive: { type: 'boolean', description: 'Default false (case-insensitive)' },
+        context_lines: { type: 'number', description: 'Optional number of lines before and after each match (0-10, default 0)' },
         summary: { type: 'string', description: '用简体中文简述本次调用的目的，20字以内' },
       },
       required: ['pattern'],
@@ -130,17 +132,32 @@ async function searchFile(pattern: string, root: string, signal?: AbortSignal): 
   return hits.join('\n') + (hits.length >= MAX_HITS ? `\n… 命中超过 ${MAX_HITS} 条，已截断` : '');
 }
 
-async function searchContent(pattern: string, root: string, glob?: string, caseSensitive?: boolean, signal?: AbortSignal): Promise<string> {
+async function searchContent(
+  pattern: string,
+  root: string,
+  glob?: string,
+  caseSensitive?: boolean,
+  contextLines = 0,
+  signal?: AbortSignal,
+): Promise<string> {
   let re: RegExp;
   try { re = new RegExp(pattern, caseSensitive ? '' : 'i'); }
   catch (e) { return `正则无效: ${(e as Error).message}`; }
+  const ctxLines = Math.min(10, Math.max(0, Math.floor(contextLines || 0)));
   const globRe = glob ? globToRegex(glob) : null;
   const hits: string[] = [];
+  let matchCount = 0;
   let scanned = 0;
 
   const st = await stat(root).catch(() => null);
+  if (!st) return `路径不存在：${root}`;
+  const singleFile = st.isFile();
+  if (singleFile && st.size > MAX_SINGLE_FILE_BYTES) {
+    return `文件大小 ${(st.size / 1024 / 1024).toFixed(1)}MB 超过 search_content 单文件上限（64MB），请改用 run_command 的 grep -n / awk 分段过滤`;
+  }
+  const byteCap = singleFile ? MAX_SINGLE_FILE_BYTES : MAX_FILE_BYTES;
   const candidates: string[] = [];
-  if (st?.isFile()) {
+  if (singleFile) {
     candidates.push(root);
   } else {
     for await (const file of walkFiles(root, { left: MAX_FILES }, signal)) {
@@ -153,21 +170,58 @@ async function searchContent(pattern: string, root: string, glob?: string, caseS
 
   let cursor = 0;
   const workers = Array.from({ length: Math.min(SEARCH_CONCURRENCY, candidates.length) }, async () => {
-    while (cursor < candidates.length && hits.length < MAX_HITS && !signal?.aborted) {
+    while (cursor < candidates.length && matchCount < MAX_HITS && !signal?.aborted) {
       const file = candidates[cursor++];
       try {
         const s = await stat(file);
-        if (s.size > MAX_FILE_BYTES) continue;
+        if (s.size > byteCap) continue;
         const text = await readFile(file, 'utf-8');
-        if (text.includes('\u0000')) continue; // 二进制
+        if (text.includes('\u0000')) {
+          if (singleFile) {
+            hits.push(`该文件包含二进制数据（${file}），无法按文本正则搜索`);
+          }
+          continue;
+        }
         scanned++;
         const lines = text.split('\n');
-        for (let i = 0; i < lines.length; i++) {
-          if (re.test(lines[i])) {
-            if (hits.length < MAX_HITS) {
-              hits.push(`${file}:${i + 1}: ${lines[i].trim().slice(0, MAX_LINE_LEN)}`);
+        if (ctxLines === 0) {
+          for (let i = 0; i < lines.length; i++) {
+            if (re.test(lines[i])) {
+              if (matchCount < MAX_HITS) {
+                hits.push(`${file}:${i + 1}: ${lines[i].trim().slice(0, MAX_LINE_LEN)}`);
+                matchCount++;
+              }
+              if (matchCount >= MAX_HITS) break;
             }
-            if (hits.length >= MAX_HITS) break;
+          }
+        } else {
+          const matchedIdx: number[] = [];
+          for (let i = 0; i < lines.length && matchCount < MAX_HITS; i++) {
+            if (re.test(lines[i])) {
+              matchedIdx.push(i);
+              matchCount++;
+            }
+          }
+          if (matchedIdx.length) {
+            const matchedSet = new Set(matchedIdx);
+            const ranges: Array<[number, number]> = [];
+            for (const idx of matchedIdx) {
+              const rs = Math.max(0, idx - ctxLines);
+              const reEnd = Math.min(lines.length - 1, idx + ctxLines);
+              const prev = ranges[ranges.length - 1];
+              if (prev && rs <= prev[1] + 1) prev[1] = Math.max(prev[1], reEnd);
+              else ranges.push([rs, reEnd]);
+            }
+            const blocks: string[] = [];
+            for (const [rs, reEnd] of ranges) {
+              const blockLines: string[] = [];
+              for (let ln = rs; ln <= reEnd; ln++) {
+                const sep = matchedSet.has(ln) ? ':' : '-';
+                blockLines.push(`${file}${sep}${ln + 1}${sep} ${lines[ln].slice(0, MAX_LINE_LEN)}`);
+              }
+              blocks.push(blockLines.join('\n'));
+            }
+            hits.push(blocks.join('\n--\n'));
           }
         }
       } catch { /* 读不了就跳过 */ }
@@ -176,7 +230,7 @@ async function searchContent(pattern: string, root: string, glob?: string, caseS
   await Promise.all(workers);
   if (signal?.aborted) throw new Error('搜索已取消');
   if (!hits.length) return `没有命中（扫描了 ${scanned} 个文件）。换个正则/放宽 glob 再试`;
-  return hits.join('\n') + (hits.length >= MAX_HITS ? `\n… 命中超过 ${MAX_HITS} 条，已截断（缩小范围）` : '');
+  return hits.join('\n') + (matchCount >= MAX_HITS ? `\n… 命中超过 ${MAX_HITS} 条，已截断（缩小范围）` : '');
 }
 
 /** 三个只读工具的统一入口。root 由调用方固定（一次运行内不漂移）。 */
@@ -190,10 +244,14 @@ export async function executeFsTool(name: string, args: Record<string, unknown>,
   }
   if (name === 'search_content') {
     const rootDir = await resolveToolPath(String(args.path || '.'), root);
-    return searchContent(String(args.pattern), rootDir,
+    return searchContent(
+      String(args.pattern),
+      rootDir,
       typeof args.glob === 'string' ? args.glob : undefined,
       args.case_sensitive === true,
-      signal);
+      typeof args.context_lines === 'number' ? args.context_lines : 0,
+      signal,
+    );
   }
   throw new Error(`Unknown fs tool: ${name}`);
 }

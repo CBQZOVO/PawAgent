@@ -37,8 +37,16 @@ function runShell(cmd: string, opts: {
       fn();
     };
     const finishWithCode = (code: number | null) => settle(() => {
-      if (code === 0) resolve({ stdout: out, stderr: err });
-      else reject(new Error(`${err || out}`.trim().slice(0, 4000) + `\n[退出码 ${code}]`));
+      if (code === 0) {
+        resolve({ stdout: out, stderr: err });
+        return;
+      }
+      // 非零退出时必须同时保留 stdout 与 stderr：原先 `err || out` 在 stderr 有一行告警时会把整段 stdout 探测结果丢光
+      const combined = [out.trim(), err.trim() ? `[stderr]\n${err.trim()}` : ''].filter(Boolean).join('\n');
+      const trimmed = combined.length > 6000
+        ? combined.slice(0, 4500) + '\n…[中间省略]…\n' + combined.slice(-1500)
+        : combined;
+      reject(new Error((trimmed ? trimmed + '\n' : '') + `[退出码 ${code}]`));
     });
     const onAbort = () => {
       killGroup('SIGTERM');
@@ -92,10 +100,14 @@ export const shellPlugin: PawPlugin<ServerToolExecCtx> = {
           return startBackgroundJob(String(args.cmd), wsRoot || homedir(), ctx.signal, { daemon: args.daemon === true });
         }
         const timeout = Math.min(300000, Math.max(1000, Number(args.timeout_ms) || 30000));
-        const { stdout, stderr } = await runShell(String(args.cmd), {
+        const cmdStr = String(args.cmd);
+        const { stdout, stderr } = await runShell(cmdStr, {
           timeout, cwd: wsRoot || homedir(), signal: ctx.signal,
         });
-        return stdout + (stderr ? '\n[stderr]\n' + stderr : '');
+        const daemonHint = /\bnohup\b[\s\S]*&/.test(cmdStr)
+          ? '\n[提示：常驻服务请优先用 run_command(daemon=true) 启动，便于通过 list_jobs / kill_job 管理且不会被轮次超时误杀]'
+          : '';
+        return stdout + (stderr ? '\n[stderr]\n' + stderr : '') + daemonHint;
       },
     },
     ...BG_TOOL_SCHEMAS.map((schema) => ({

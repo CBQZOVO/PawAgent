@@ -9,8 +9,7 @@ const STATUSES = new Set(['pending', 'in_progress', 'completed']);
 export const TODO_TOOL_SCHEMA: ToolSchema = {
   name: 'todo_write',
   description: 'Create/update the task checklist for a multi-step job. Pass the FULL list every time (it replaces the previous one). '
-    + 'Mark exactly one item in_progress while working on it, and flip it to completed the moment it is done. '
-    // 收尾条款：不写清楚，模型正文写完就停手，清单永远停在 9/11（CodeBuddy 也栽在这）
+    + 'Mark active item(s) in_progress while working on them (multiple allowed when running parallel tracks/subagents), and flip each to completed as soon as it is done. '
     + 'Before you write your final answer, the list must contain no pending or in_progress item: '
     + 'mark everything you actually finished as completed; for anything you deliberately skipped, '
     + 'say so in the answer rather than leaving it hanging. '
@@ -48,8 +47,6 @@ export function executeTodoWrite(args: Record<string, unknown>): string {
     if (!STATUSES.has(status)) throw new Error(`第 ${i + 1} 项 status 无效: ${status}（只能是 pending/in_progress/completed）`);
     return { content, status: status as TodoItem['status'] };
   });
-  const doing = todos.filter((t) => t.status === 'in_progress').length;
-  if (doing > 1) throw new Error('同一时间只能有 1 项 in_progress');
   const done = todos.filter((t) => t.status === 'completed').length;
   const lines = todos.map((t) => `${t.status === 'completed' ? '✅' : t.status === 'in_progress' ? '🔄' : '⬜'} ${t.content}`);
   return `清单已更新（${done}/${todos.length} 完成）\n${lines.join('\n')}`;

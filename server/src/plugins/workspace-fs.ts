@@ -30,6 +30,10 @@ export const workspaceFsPlugin: PawPlugin<ServerToolExecCtx> = {
       execute: async (args, _id, ctx) => {
         const abs = await resolveToolPath(String(args.path), ctx.workspace);
         const st = await stat(abs).catch(() => null);
+        if (st?.isDirectory()) {
+          const listing = await executeFsTool('list_dir', { path: abs }, ctx.workspace, ctx.signal);
+          return `[提示：该路径是目录而非文件，已直接返回目录列表；后续查看目录请调用 list_dir]\n${listing}`;
+        }
         if (st && st.size > 8 * 1024 * 1024) {
           throw new Error(`文件超过 8MB（${(st.size / 1024 / 1024).toFixed(1)}MB），read_file 不支持整读；请用 run_command 的 head/tail/grep 分段查看`);
         }

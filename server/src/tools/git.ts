@@ -3,6 +3,9 @@
 // 专用工具比 run_command 拼 git 命令更稳（固定参数、限制输出、参数转义）。
 // 注意：不做 push（对外动作先问用户），也不做 reset --hard 这类破坏性操作。
 import { exec } from 'node:child_process';
+import { existsSync } from 'node:fs';
+import { readdir } from 'node:fs/promises';
+import path from 'node:path';
 import { promisify } from 'node:util';
 import type { ToolSchema } from '@paw/shared';
 import { getWorkspaceRoot, resolveToolPath } from '../workspace.js';
@@ -100,6 +103,54 @@ function shellQuote(s: string): string {
   return `'${s.replace(/'/g, `'\\''`)}'`;
 }
 
+async function findChildGitRepos(dir: string): Promise<string[]> {
+  try {
+    const entries = await readdir(dir, { withFileTypes: true });
+    const subs: string[] = [];
+    for (const e of entries) {
+      if (!e.isDirectory() || e.name.startsWith('.')) continue;
+      if (existsSync(path.join(dir, e.name, '.git'))) subs.push(e.name);
+      if (subs.length >= 12) break;
+    }
+    return subs;
+  } catch {
+    return [];
+  }
+}
+
+/** 微服务多仓库工作区适配：若工作区根目录自身无 .git，但传入的 file/files 落在子 Git 仓库内，自动切到该子仓库执行 */
+function resolveGitTarget(
+  baseCwd: string,
+  explicitPath: boolean,
+  args: Record<string, unknown>,
+): { cwd: string; file?: string; files?: string[] } {
+  const rawFile = typeof args.file === 'string' && args.file.trim() ? args.file.trim() : undefined;
+  const rawFiles = Array.isArray(args.files) ? args.files.map(String).filter(Boolean) : undefined;
+  if (explicitPath || existsSync(path.join(baseCwd, '.git'))) {
+    return { cwd: baseCwd, file: rawFile, files: rawFiles };
+  }
+  const probe = rawFile ?? rawFiles?.[0];
+  if (!probe) return { cwd: baseCwd, file: rawFile, files: rawFiles };
+  const absProbe = path.resolve(baseCwd, probe);
+  let cur = absProbe;
+  const rootResolved = path.resolve(baseCwd);
+  const rootPrefix = rootResolved.endsWith(path.sep) ? rootResolved : rootResolved + path.sep;
+  while (cur.startsWith(rootPrefix)) {
+    if (existsSync(path.join(cur, '.git'))) {
+      const toRel = (p: string) => path.relative(cur, path.resolve(baseCwd, p)) || '.';
+      return {
+        cwd: cur,
+        file: rawFile ? toRel(rawFile) : undefined,
+        files: rawFiles ? rawFiles.map(toRel) : undefined,
+      };
+    }
+    const parent = path.dirname(cur);
+    if (parent === cur) break;
+    cur = parent;
+  }
+  return { cwd: baseCwd, file: rawFile, files: rawFiles };
+}
+
 async function runGit(cmd: string, cwd: string, signal?: AbortSignal): Promise<string> {
   try {
     const { stdout, stderr } = await execAsync(cmd, { cwd, env: buildShellEnv(), timeout: 15000, maxBuffer: 4e6, signal });
@@ -108,16 +159,25 @@ async function runGit(cmd: string, cwd: string, signal?: AbortSignal): Promise<s
   } catch (e) {
     const err = e as Error & { stderr?: string; stdout?: string };
     const msg = (err.stderr || err.message || '').trim();
-    if (/not a git repository/i.test(msg)) throw new Error('当前目录不是 git 仓库');
+    if (/not a git repository/i.test(msg)) {
+      const subRepos = await findChildGitRepos(cwd);
+      if (subRepos.length) {
+        throw new Error(`当前工作区根目录不是 Git 仓库，但发现以下子目录是独立 Git 仓库：${subRepos.join('、')}。请通过 path 参数传入具体子仓库路径。`);
+      }
+      throw new Error('当前目录不是 git 仓库');
+    }
     throw new Error(msg.slice(0, 500));
   }
 }
 
 export async function executeGitTool(name: string, args: Record<string, unknown>, workspace?: string | null, signal?: AbortSignal): Promise<string> {
-  const cwd = typeof args.path === 'string' && args.path.trim()
-    ? await resolveToolPath(args.path.trim(), workspace)
+  const hasExplicitPath = typeof args.path === 'string' && !!args.path.trim();
+  const baseCwd = hasExplicitPath
+    ? await resolveToolPath(String(args.path).trim(), workspace)
     : (workspace === undefined ? await getWorkspaceRoot() : workspace) || process.cwd();
-  const file = typeof args.file === 'string' && args.file ? ` -- ${shellQuote(args.file)}` : '';
+  const resolved = resolveGitTarget(baseCwd, hasExplicitPath, args);
+  const cwd = resolved.cwd;
+  const file = resolved.file ? ` -- ${shellQuote(resolved.file)}` : '';
   if (name === 'git_status') {
     return runGit('git status --short --branch', cwd, signal);
   }
@@ -134,7 +194,7 @@ export async function executeGitTool(name: string, args: Record<string, unknown>
   if (name === 'git_commit') {
     const message = String(args.message ?? '').trim();
     if (!message) throw new Error('git_commit 需要非空的 message');
-    const files = Array.isArray(args.files) ? args.files.map(String).filter(Boolean) : [];
+    const files = resolved.files ?? [];
     if (files.length) await runGit(`git add -- ${files.map(shellQuote).join(' ')}`, cwd, signal);
     else if (args.all === true) await runGit('git add -A', cwd, signal);
     // 默认只 stage 已跟踪文件的改动：避免把 .env、node_modules 里的新东西卷进去

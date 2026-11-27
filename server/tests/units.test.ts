@@ -523,18 +523,16 @@ await atest('worklog：插入 → 按日/按项目查询 → worklog_search 可�
   }
 });
 
-await atest('todo_write：合法清单回显进度；多项 in_progress 拒绝', async () => {
+await atest('todo_write：支持并行多项 in_progress，且声明为 readOnly 不阻塞只读并发', async () => {
+  const { pawPlugins } = await import('../src/plugins/index.js');
+  assert.equal(pawPlugins.isReadOnly('todo_write'), true, 'todo_write 应标记为 readOnly 以免拆散同轮只读并发');
   const r = await executeTool('todo_write', { todos: [
     { content: '步骤一', status: 'completed' },
-    { content: '步骤二', status: 'in_progress' },
-    { content: '步骤三', status: 'pending' },
+    { content: '并行分支A', status: 'in_progress' },
+    { content: '并行分支B', status: 'in_progress' },
   ] }, 't1', {});
   assert.equal(r.isError, false);
   assert.match(r.content, /1\/3 完成/);
-  const bad = await executeTool('todo_write', { todos: [
-    { content: 'a', status: 'in_progress' }, { content: 'b', status: 'in_progress' },
-  ] }, 't2', {});
-  assert.equal(bad.isError, true);
 });
 
 await atest('git_status/git_log：在 git 仓库里能跑', async () => {
@@ -763,6 +761,75 @@ test('normalizeQuestions：兼容对象型 options（label/description/text/valu
   assert.equal(qs.length, 1);
   assert.equal(qs[0].multiple, true);
   assert.deepEqual(qs[0].options, ['方案A — 走生产 ingpt', '方案B', '方案C — 仅本地', '纯字符串选项']);
+});
+
+await atest('循环流畅性回归：search_content 单大日志文件 + context_lines、read_file 目录降级、run_command 保留 stdout、open_browser、多子仓库 Git', async () => {
+  const { execFileSync } = await import('node:child_process');
+  const { mkdir: mkdirFs, writeFile: writeFs } = await import('node:fs/promises');
+  const box = await mkdtemp(path.join(tmpdir(), 'paw-fluency-'));
+  try {
+    // 1) search_content：>2MB 的单日志文件不静默跳过，且支持 context_lines
+    const bigLog = path.join(box, 'app.log');
+    const padLine = '2026-11-26 10:58:00 INFO normal heartbeat message padding text 0123456789\n';
+    const bigBody = padLine.repeat(32_000) // ~2.3MB > 2MB
+      + '2026-11-26 10:58:36 INFO before-context\n'
+      + '2026-11-26 10:58:36 ERROR EsBidDocCheckService 获取查重结果明细失败\n'
+      + '2026-11-26 10:58:36 WARN after-context-stack\n';
+    await writeFs(bigLog, bigBody);
+    const sc = await executeTool('search_content', {
+      path: bigLog,
+      pattern: '获取查重结果明细失败',
+      context_lines: 1,
+    }, 'sc-big', { workspace: box });
+    assert.equal(sc.isError, false);
+    assert.match(sc.content, /before-context/);
+    assert.match(sc.content, /获取查重结果明细失败/);
+    assert.match(sc.content, /after-context-stack/);
+
+    // 2) read_file：传入目录不抛 EISDIR，直接降级返回目录列表
+    const rdDir = await executeTool('read_file', { path: box }, 'rf-dir', { workspace: box });
+    assert.equal(rdDir.isError, false);
+    assert.match(rdDir.content, /app\.log/);
+
+    // 3) run_command：非零退出且同时有 stdout 和 stderr 时，不得丢弃 stdout
+    const rc = await executeTool('run_command', {
+      cmd: 'echo "PROBE_STDOUT_OK"; echo "MINOR_STDERR_WARN" >&2; exit 1',
+    }, 'rc-both', { workspace: box });
+    assert.equal(rc.isError, true);
+    assert.match(rc.content, /PROBE_STDOUT_OK/, '非零退出时必须保留 stdout 探测输出');
+    assert.match(rc.content, /MINOR_STDERR_WARN/);
+
+    // 4) open_browser：合法 http/https 发射事件，非法协议拒绝
+    const emitted: unknown[] = [];
+    const ob = await executeTool('open_browser', { url: 'v2ex.com', title: 'V2EX' }, 'ob-1', {
+      emit: (ev) => emitted.push(ev),
+    });
+    assert.equal(ob.isError, false);
+    assert.equal(emitted.length, 1);
+    assert.deepEqual(emitted[0], { type: 'open_browser', url: 'https://v2ex.com/', title: 'V2EX' });
+    const obBad = await executeTool('open_browser', { url: 'javascript:alert(1)' }, 'ob-2', {});
+    assert.equal(obBad.isError, true);
+
+    // 5) 多子仓库工作区：git_log(file="subrepo-a/...") 自动定位子仓库；根目录 git_status 提示子仓库名
+    const subRepo = path.join(box, 'subrepo-a');
+    await mkdirFs(subRepo, { recursive: true });
+    execFileSync('git', ['init'], { cwd: subRepo, stdio: 'ignore' });
+    execFileSync('git', ['config', 'user.name', 'Paw Test'], { cwd: subRepo, stdio: 'ignore' });
+    execFileSync('git', ['config', 'user.email', 'test@example.com'], { cwd: subRepo, stdio: 'ignore' });
+    await writeFs(path.join(subRepo, 'Service.java'), 'class Service {}\n');
+    execFileSync('git', ['add', 'Service.java'], { cwd: subRepo, stdio: 'ignore' });
+    execFileSync('git', ['commit', '-m', 'add service'], { cwd: subRepo, stdio: 'ignore' });
+
+    const subLog = await executeTool('git_log', { file: 'subrepo-a/Service.java', count: 5 }, 'gl-sub', { workspace: box });
+    assert.equal(subLog.isError, false, '传入子仓库内文件路径时应自动路由到子 Git 仓库');
+    assert.match(subLog.content, /add service/);
+
+    const rootSt = await executeTool('git_status', {}, 'gs-root', { workspace: box });
+    assert.equal(rootSt.isError, true);
+    assert.match(rootSt.content, /subrepo-a/, '非 Git 聚合根目录应提示已发现的子 Git 仓库名称');
+  } finally {
+    await rm(box, { recursive: true, force: true });
+  }
 });
 
 await rm(tmp, { recursive: true, force: true });
