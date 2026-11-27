@@ -12,7 +12,33 @@ try {
   const estimate = inspectContext([{ role: 'user', content: '问题' }], [], ['data:image/...']);
   assert.equal(estimate.windowTokens, 1_000_000);
   assert.equal(estimate.thresholdTokens, 800_000);
-  assert.equal(estimate.estimatedTokens, estimate.byCategory.user + 1024);
+  assert.equal(estimate.estimatedTokens, estimate.byCategory.dialog + 1024);
+
+  // 7 类分项拆分：<available_skills> + <selected_skills> → skills；call_api + srv__tool → mcp；各项之和严格等于 estimatedTokens
+  const detailed = inspectContext(
+    [
+      { role: 'system', content: '系统人设\n<available_skills>\n- demo: 描述\n</available_skills>' },
+      { role: 'user', content: '<selected_skills>\n<skill name="demo">完整技能指令内容</skill>\n</selected_skills>\n\n帮我执行' },
+      call('t1'),
+      result('t1', '工具返回结果文本'),
+    ],
+    [
+      { name: 'read_file', description: 'read', parameters: { type: 'object', properties: {} } },
+      { name: 'call_api', description: 'conn', parameters: { type: 'object', properties: {} } },
+      { name: 'harbor__list', description: 'mcp', parameters: { type: 'object', properties: {} } },
+    ],
+  );
+  assert.ok(detailed.byCategory.system > 0);
+  assert.ok(detailed.byCategory.skills > 0);
+  assert.ok(detailed.byCategory.dialog > 0);
+  assert.ok(detailed.byCategory.toolResult > 0);
+  assert.ok(detailed.byCategory.agentTools > 0);
+  assert.ok(detailed.byCategory.mcp > 0);
+  assert.equal(
+    Object.values(detailed.byCategory).reduce((a, b) => a + b, 0),
+    detailed.estimatedTokens,
+    'byCategory 7 项之和必须严格等于 estimatedTokens',
+  );
   const messages: ChatMessage[] = [
     { role: 'system', content: '原始规则' }, { role: 'user', content: '最新问题' },
     call('a'), result('a', '文件内容😀'.repeat(150_001)), call('b'), result('b', '新结果'),

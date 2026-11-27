@@ -112,7 +112,7 @@ try {
   const legacyReading = await reading('manual', 'legacy', since);
   assert.equal(legacyReading.reading.tokens, 123);
   assert.equal(legacyReading.reading.estimated, false);
-  assert.ok(legacyReading.reading.byCategory && typeof legacyReading.reading.byCategory.user === 'number', '历史读数应还原 byCategory');
+  assert.ok(legacyReading.reading.byCategory && typeof legacyReading.reading.byCategory.dialog === 'number', '历史读数应还原 byCategory');
   assert.equal(summaries, 1);
   // 每轮对话收尾会异步触发复盘（reflection.ts），轮询等它发起到测试网关
   await new Promise<void>((resolve, reject) => {
@@ -145,7 +145,7 @@ try {
   assert.deepEqual(await reading('auto', 'second'), { reading: actual });
   assert.deepEqual(await reading('manual', 'second'), { reading: null });
   assert.deepEqual(await reading('auto', 'first'), { reading: null });
-  assert.ok(latest.byCategory.tools > 0 && latest.reclaimedTokens > 0);
+  assert.ok(latest.byCategory.agentTools > 0 && latest.reclaimedTokens > 0);
   // ---------- 同一轮 tool_call 撞 id / 网关首包前瞬断 ----------
   const toolFrame = (index: number, args: object) => ({ choices: [{ delta: { tool_calls: [{ index, id: 'dup', type: 'function', function: { name: 'read_file', arguments: JSON.stringify(args) } }] } }] });
   await writeFile(join(dir, 'a.txt'), 'AAA');

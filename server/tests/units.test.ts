@@ -832,6 +832,27 @@ await atest('循环流畅性回归：search_content 单大日志文件 + context
   }
 });
 
+await atest('db.getContextReading：兼容旧版 6 字段 byCategory 历史样本迁移', async () => {
+  const { addContextSample, deleteSession, getContextReading } = await import('../src/db.js');
+  const sid = 'legacy-cat-' + Date.now();
+  try {
+    addContextSample(sid, {
+      kind: 'request',
+      turnId: 't-legacy',
+      estimatedTokens: 350,
+      byCategory: { system: 100, user: 40, assistant: 60, tool: 50, tools: 80, images: 20 },
+    });
+    const r = getContextReading(sid, 't-legacy');
+    assert.deepEqual(r, {
+      tokens: 350,
+      estimated: true,
+      byCategory: { system: 100, skills: 0, dialog: 100, toolResult: 50, agentTools: 80, mcp: 0, images: 20 },
+    });
+  } finally {
+    deleteSession(sid);
+  }
+});
+
 await rm(tmp, { recursive: true, force: true });
 
 console.log(`\n${pass} 项通过`);

@@ -777,32 +777,31 @@ button { font-family: inherit; cursor: pointer; }
 .context-meter-fill { stroke: var(--brand); stroke-linecap: round; transition: stroke-dasharray .2s ease; }
 .context-meter:focus-visible { border-radius: 50%; box-shadow: 0 0 0 3px var(--brand-soft); }
 .context-meter-menu {
-  position: absolute; bottom: 34px; right: 0; width: 268px; padding: 6px; z-index: 25;
+  position: absolute; bottom: 34px; right: 0; width: 280px; padding: 6px; z-index: 25;
   background: #fff; border: 1px solid var(--line); border-radius: 10px;
   box-shadow: 0 8px 28px rgb(41 72 110 / 12%); display: flex; flex-direction: column; gap: 4px;
 }
-.context-meter-stat { font-size: 12px; color: var(--text-secondary); padding: 4px 8px 6px; border-bottom: 1px solid var(--line-light); }
-.context-meter-breakdown {
-  display: flex; flex-direction: column; gap: 5px;
-  padding: 6px 8px 7px; border-bottom: 1px solid var(--line-light);
+.context-meter-title { font-size: 12px; color: var(--text-secondary); padding: 6px 10px 0; }
+.context-meter-stat { display: flex; align-items: baseline; gap: 8px; padding: 2px 10px 8px; }
+.context-meter-big { font-size: 24px; font-weight: 700; color: var(--ink); letter-spacing: -.01em; font-variant-numeric: tabular-nums; }
+.context-meter-used { font-size: 12px; color: var(--text-secondary); }
+/* 分段彩条：每段宽度 = 该类 token 占整个上下文窗口的比例，剩余灰底 */
+.context-meter-segbar {
+  display: flex; height: 6px; border-radius: 999px; background: var(--line-light);
+  overflow: hidden; margin: 0 10px;
 }
-.context-meter-row {
-  display: grid; grid-template-columns: 56px 1fr auto; align-items: center; gap: 8px;
-  font-size: 11.5px; color: var(--text-regular);
+.context-meter-segbar span { display: block; height: 100%; }
+.context-meter-segbar span + span { margin-left: 1px; }
+.context-meter-segbar .fill { background: var(--brand); }
+.context-meter-legend { display: flex; flex-direction: column; gap: 7px; padding: 10px; }
+.context-meter-legend-row { display: flex; align-items: center; gap: 8px; font-size: 12.5px; }
+.context-meter-dot { width: 8px; height: 8px; border-radius: 50%; flex: 0 0 auto; }
+.context-meter-legend-label { flex: 1; color: var(--text-regular); }
+.context-meter-legend-val { color: var(--text-secondary); font-variant-numeric: tabular-nums; }
+.context-meter-note {
+  font-size: 10.5px; color: var(--text-placeholder); padding: 7px 10px;
+  border-top: 1px solid var(--line-light);
 }
-.context-meter-row-label { color: var(--text-secondary); white-space: nowrap; }
-.context-meter-row-bar {
-  height: 5px; border-radius: 999px; background: var(--soft); overflow: hidden;
-}
-.context-meter-row-fill {
-  display: block; height: 100%; border-radius: 999px; background: var(--brand); opacity: .75;
-}
-.context-meter-row-val {
-  display: inline-flex; align-items: baseline; justify-content: flex-end; gap: 4px;
-  min-width: 66px; font-variant-numeric: tabular-nums; color: var(--ink);
-}
-.context-meter-row-val small { font-size: 10.5px; color: var(--text-placeholder); min-width: 26px; text-align: right; }
-.context-meter-note { font-size: 10.5px; color: var(--text-placeholder); padding-top: 2px; }
 .context-meter-action {
   display: flex; align-items: center; gap: 8px; width: 100%; text-align: left;
   border: 0; background: transparent; padding: 7px 8px; border-radius: 7px; cursor: pointer; color: var(--ink);

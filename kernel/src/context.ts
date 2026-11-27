@@ -8,17 +8,53 @@ import {
 // 用序列化后的 UTF-8 字节数 / 3 粗估，计入角色、推理、工具参数及结果。图片按张估算。
 const tokens = (text: string) => Math.ceil(Buffer.byteLength(text) / 3);
 
+const SKILLS_TAG = '<available_skills>';
+const SKILLS_TAG_END = '</available_skills>';
+const SELECTED_SKILLS_TAG = '<selected_skills>';
+const SELECTED_SKILLS_TAG_END = '</selected_skills>';
+
+/** 按成对 XML 标签在原文中的占比，从整条消息的估算 cost 中拆出该块开销（保证各项之和严格等于总 cost） */
+function extractTagCost(text: string, openTag: string, closeTag: string, cost: number): number {
+  const start = text.indexOf(openTag);
+  const end = start >= 0 ? text.indexOf(closeTag, start) : -1;
+  if (start < 0 || end <= start) return 0;
+  const total = tokens(text);
+  if (total <= 0) return 0;
+  const block = tokens(text.slice(start, end + closeTag.length));
+  return Math.min(cost, Math.round(cost * (block / total)));
+}
+
 export function inspectContext(
   messages: ChatMessage[],
   tools: ToolSchema[],
   images: string[] = [],
   windowTokens = DEFAULT_CONTEXT_WINDOW_TOKENS,
 ) {
-  const byCategory = { system: 0, user: 0, assistant: 0, tool: 0, tools: 0, images: images.length * 1024 };
+  const byCategory = { system: 0, skills: 0, dialog: 0, toolResult: 0, agentTools: 0, mcp: 0, images: images.length * 1024 };
   for (const message of messages) {
-    byCategory[message.role] += tokens(JSON.stringify(message)) + 4 + (message.tool_calls?.length ?? 0) * 12;
+    const cost = tokens(JSON.stringify(message)) + 4 + (message.tool_calls?.length ?? 0) * 12;
+    if (message.role === 'system') {
+      // 技能清单是系统提示里的独立分项：按 <available_skills> 块的原文占比拆出，其余记系统提示
+      const text = typeof message.content === 'string' ? message.content : JSON.stringify(message.content);
+      const skillsCost = extractTagCost(text, SKILLS_TAG, SKILLS_TAG_END, cost);
+      byCategory.skills += skillsCost;
+      byCategory.system += cost - skillsCost;
+    } else if (message.role === 'tool') {
+      byCategory.toolResult += cost;
+    } else {
+      // user 消息中显式选中的技能全文（<selected_skills>）一并归入 skills 分项
+      const text = message.role === 'user' && typeof message.content === 'string' ? message.content : '';
+      const skillsCost = text ? extractTagCost(text, SELECTED_SKILLS_TAG, SELECTED_SKILLS_TAG_END, cost) : 0;
+      byCategory.skills += skillsCost;
+      byCategory.dialog += cost - skillsCost;
+    }
   }
-  for (const tool of tools) byCategory.tools += tokens(JSON.stringify(tool)) + 12;
+  for (const tool of tools) {
+    const cost = tokens(JSON.stringify(tool)) + 12;
+    // MCP 工具（server__ 前缀）与系统连接器（call_api）统一计入「连接器及MCP」
+    if (tool.name.includes('__') || tool.name === 'call_api') byCategory.mcp += cost;
+    else byCategory.agentTools += cost;
+  }
   const estimatedTokens = Object.values(byCategory).reduce((sum, n) => sum + n, 0);
   return { estimatedTokens, windowTokens, thresholdTokens: Math.ceil(windowTokens * 0.8), byCategory };
 }

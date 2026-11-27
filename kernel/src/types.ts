@@ -55,11 +55,12 @@ export interface TodoItem {
 export type SubagentStatus = 'running' | 'completed' | 'error' | 'aborted' | 'timeout' | 'limit';
 
 export interface ContextCategory {
-  system: number;
-  user: number;
-  assistant: number;
-  tool: number;
-  tools: number;
+  system: number;     // 系统提示词（不含技能块）
+  skills: number;     // 技能（系统提示里的 <available_skills> 块）
+  dialog: number;     // 对话消息（user + assistant）
+  toolResult: number; // 工具结果（tool 角色）
+  agentTools: number; // 内建工具及子智能体 schema
+  mcp: number;        // 连接器及 MCP 工具 schema（名字带 server__ 前缀）
   images: number;
 }
 

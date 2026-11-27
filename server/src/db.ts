@@ -345,13 +345,26 @@ export function getContextSamples(id: string): object[] {
 function parseContextCategory(raw: unknown): ContextCategory | undefined {
   if (!raw || typeof raw !== 'object') return undefined;
   const r = raw as Record<string, unknown>;
-  const keys = ['system', 'user', 'assistant', 'tool', 'tools', 'images'] as const;
-  const out = {} as ContextCategory;
-  for (const k of keys) {
-    if (!Number.isFinite(r[k])) return undefined;
-    out[k] = Number(r[k]);
+  const keys = ['system', 'skills', 'dialog', 'toolResult', 'agentTools', 'mcp', 'images'] as const;
+  if (keys.every((k) => Number.isFinite(r[k]))) {
+    const out = {} as ContextCategory;
+    for (const k of keys) out[k] = Number(r[k]);
+    return out;
   }
-  return out;
+  // 兼容旧版 6 字段历史样本（system/user/assistant/tool/tools/images），避免老会话打开丢失分项
+  const legacyKeys = ['system', 'user', 'assistant', 'tool', 'tools', 'images'] as const;
+  if (legacyKeys.every((k) => Number.isFinite(r[k]))) {
+    return {
+      system: Number(r.system),
+      skills: 0,
+      dialog: Number(r.user) + Number(r.assistant),
+      toolResult: Number(r.tool),
+      agentTools: Number(r.tools),
+      mcp: 0,
+      images: Number(r.images),
+    };
+  }
+  return undefined;
 }
 
 export function getContextReading(id: string, turnId: string, since?: number): ContextReading | null {
