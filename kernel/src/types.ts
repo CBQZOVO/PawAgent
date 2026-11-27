@@ -30,6 +30,15 @@ export interface ToolResult {
   tool_call_id: string;
   content: string;
   isError?: boolean;
+  rejectedByUser?: boolean;
+}
+
+export type PermissionDecision = 'allow_once' | 'deny' | 'allow_session' | 'deny_session';
+
+export interface SessionPermission {
+  mode: 'default' | 'strict';
+  allow: string[];
+  deny: string[];
 }
 
 export interface AskQuestion {
@@ -45,9 +54,19 @@ export interface TodoItem {
 
 export type SubagentStatus = 'running' | 'completed' | 'error' | 'aborted' | 'timeout' | 'limit';
 
+export interface ContextCategory {
+  system: number;
+  user: number;
+  assistant: number;
+  tool: number;
+  tools: number;
+  images: number;
+}
+
 export interface ContextReading {
   tokens: number;
   estimated: boolean;
+  byCategory?: ContextCategory;
 }
 
 export interface ToolProgress {
@@ -66,8 +85,18 @@ export type AgentEvent =
   | { type: 'tool_done'; id: string; name: string; ok: boolean; output: string }
   | { type: 'tool_progress'; id: string; name: string; progress: ToolProgress }
   | { type: 'text'; delta: string }
-  | { type: 'done'; usage?: { prompt: number; completion: number } }
+  | { type: 'done'; usage?: { prompt: number; completion: number }; rounds?: number }
   | { type: 'error'; message: string }
+  | {
+      type: 'permission_ask';
+      id: string;
+      toolCallId: string;
+      tool: string;
+      title: string;
+      detail: string;
+      options: PermissionDecision[];
+    }
+  | { type: 'permission_updated'; permission: SessionPermission }
   | { type: 'subagent_start'; id: string; toolCallId?: string; name: string; agentName: string; task: string }
   | { type: 'subagent_event'; id: string; event: AgentEvent }
   | { type: 'subagent_done'; id: string; status: SubagentStatus; summary: string;
@@ -129,7 +158,7 @@ export interface ContextSampleRecord {
   estimatedTokens: number;
   windowTokens: number;
   thresholdTokens: number;
-  byCategory: { system: number; user: number; assistant: number; tool: number; tools: number; images: number };
+  byCategory: ContextCategory;
   usage?: { prompt: number; completion: number };
   finishReason?: string | null;
   beforeTokens: number;
@@ -203,6 +232,7 @@ export interface ToolExecutionContext {
   depth: number;
   allowedTools?: string[];
   sessionId?: string;
+  unattended?: boolean;
   emit: (ev: AgentEvent) => void;
   parentMessages?: ChatMessage[];
   outputSchema?: Record<string, unknown>;
@@ -212,6 +242,12 @@ export interface ToolExecutionContext {
 export interface ToolRuntime {
   getSchemas(): Promise<ToolSchema[]> | ToolSchema[];
   execute(name: string, args: Record<string, unknown>, toolCallId: string, ctx: ToolExecutionContext): Promise<ToolResult>;
+  authorize?(
+    name: string,
+    args: Record<string, unknown>,
+    toolCallId: string,
+    ctx: ToolExecutionContext,
+  ): Promise<{ decision: 'allow' | 'deny'; reason?: string; rejectedByUser?: boolean }>;
   isReadOnly?(name: string): boolean;
   isMutating?(name: string, args: Record<string, unknown>): boolean;
   isPrunable?(name: string): boolean;

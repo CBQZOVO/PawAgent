@@ -36,6 +36,16 @@ export interface ToolResult {
   tool_call_id: string;
   content: string;
   isError?: boolean;
+  /** 用户在严格权限模式下主动拒绝执行（不计入内核连续失败护栏） */
+  rejectedByUser?: boolean;
+}
+
+export type PermissionDecision = 'allow_once' | 'deny' | 'allow_session' | 'deny_session';
+
+export interface SessionPermission {
+  mode: 'default' | 'strict';
+  allow: string[];
+  deny: string[];
 }
 
 /**
@@ -108,9 +118,19 @@ export interface SubagentView {
   tokens?: { prompt: number; completion: number }; // 二期：token 用量统计
 }
 
+export interface ContextCategory {
+  system: number;
+  user: number;
+  assistant: number;
+  tool: number;
+  tools: number;
+  images: number;
+}
+
 export interface ContextReading {
   tokens: number;
   estimated: boolean;
+  byCategory?: ContextCategory;
 }
 
 /**
@@ -128,8 +148,19 @@ export type AgentEvent =
   | { type: 'tool_done'; id: string; name: string; ok: boolean; output: string }
   | { type: 'tool_progress'; id: string; name: string; progress: ToolProgress }
   | { type: 'text'; delta: string }
-  | { type: 'done'; usage?: { prompt: number; completion: number } }
+  | { type: 'done'; usage?: { prompt: number; completion: number }; rounds?: number }
   | { type: 'error'; message: string }
+  // 严格权限模式：挂起当前工具调用等待用户放行或拒绝
+  | {
+      type: 'permission_ask';
+      id: string;
+      toolCallId: string;
+      tool: string;
+      title: string;
+      detail: string;
+      options: PermissionDecision[];
+    }
+  | { type: 'permission_updated'; permission: SessionPermission }
   // 子代理：start 建卡片 → event 透传过程（text/tool_start/tool_done）→ done 收尾
   | { type: 'subagent_start'; id: string; toolCallId?: string; name: string; agentName: string; task: string }
   | { type: 'subagent_event'; id: string; event: AgentEvent }
@@ -259,6 +290,40 @@ export interface ChatRequest {
   handoff?: HandoffContext;
   /** 若当前会话由旧会话交接而来，携带源会话 id 供 search_parent_session 按需回查 */
   parentSessionId?: string;
+  /** 客户端当前会话的权限配置兜底（防新建会话首轮尚未防抖落库时丢失 strict 配置） */
+  permission?: SessionPermission;
+}
+
+/** /btw 只读旁路问答请求：不落库、不调工具、不触发复盘 */
+export interface BtwRequest {
+  messages: ChatMessage[];
+  model?: string;
+  workspace?: string | null;
+}
+
+/** 单轮执行轨迹（落 turn_traces 表，用于排查慢轮次与工具耗时分解） */
+export interface TurnTraceTool {
+  id: string;
+  name: string;
+  start: number;
+  end: number;
+  ms: number;
+  ok: boolean;
+  rejectedByUser?: boolean;
+}
+
+export interface TurnTrace {
+  turnId: string;
+  at: number;
+  totalMs: number;
+  firstTextMs?: number;
+  toolMs: number;
+  approvalWaitMs: number;
+  modelMs: number;
+  rounds: number;
+  usage?: { prompt: number; completion: number };
+  model?: string;
+  tools: TurnTraceTool[];
 }
 
 /** 会话持久化类型（前后端共用：web localStorage 缓存 + server SQLite） */
@@ -600,6 +665,7 @@ export interface Session {
   parentId?: string;    // 子代理会话：父会话 id（侧栏不显示，只从子代理卡片进）
   handoffFrom?: HandoffLink; // 交接来源会话（顶栏显示「← 承接自」快捷跳转）
   handoffTo?: HandoffLink;   // 已交接至哪个新会话（原会话底部显示跳转提示）
+  permission?: SessionPermission; // 按会话的工具权限配置（默认 default 不拦截）
 }
 
 /** 会话列表摘要（/api/sessions 只返回这些，消息正文按需从 /api/sessions/:id 拉取） */
@@ -614,6 +680,18 @@ export interface SessionSummary {
   parentId?: string;
   handoffFrom?: HandoffLink;
   handoffTo?: HandoffLink;
+  permission?: SessionPermission;
+}
+
+/** 历史消息搜索命中项（/api/sessions/search 返回） */
+export interface SessionSearchResult {
+  sessionId: string;
+  title: string;
+  updatedAt: number;
+  workspace?: string;
+  messageId: string;
+  role: 'user' | 'assistant';
+  snippet: string;
 }
 
 /**

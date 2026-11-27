@@ -8,13 +8,13 @@ export const memoryPlugin: PawPlugin<ServerToolExecCtx> = {
   tools: [
     ...MEMORY_TOOL_SCHEMAS.map((schema) => ({
       schema,
-      meta: { readOnly: schema.name === 'memory_search' },
+      meta: { readOnly: schema.name === 'memory_search', mutating: schema.name !== 'memory_search' },
       execute: (args: Record<string, unknown>, _id: string, ctx: ServerToolExecCtx) =>
         executeMemoryTool(schema.name, args, ctx.workspace),
     })),
     ...WORKLOG_TOOL_SCHEMAS.map((schema) => ({
       schema,
-      meta: { readOnly: schema.name === 'worklog_search' },
+      meta: { readOnly: schema.name === 'worklog_search', mutating: schema.name !== 'worklog_search' },
       execute: (args: Record<string, unknown>) => executeWorklogTool(schema.name, args),
     })),
   ],

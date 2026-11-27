@@ -1,5 +1,5 @@
 // SSE 客户端：POST /api/chat → 逐条 yield AgentEvent（类型来自 shared，前后端同一份契约）
-import { normalizeMessage, type AgentEvent, type Attachment, type ChatMessage, type ContextReading, type HandoffContext, type Session, type TaskRun, type ViewMessage } from '@paw/shared';
+import { normalizeMessage, type AgentEvent, type Attachment, type ChatMessage, type ContextReading, type HandoffContext, type PermissionDecision, type Session, type SessionPermission, type SessionSearchResult, type SessionSummary, type TaskRun, type TurnTrace, type ViewMessage } from '@paw/shared';
 
 export interface StreamChatOptions {
   model?: string;
@@ -19,6 +19,8 @@ export interface StreamChatOptions {
   handoff?: HandoffContext;
   /** 交接来源会话 id（供 search_parent_session 回查） */
   parentSessionId?: string;
+  /** 客户端当前会话的权限配置兜底 */
+  permission?: SessionPermission;
 }
 
 export async function getContextReading(sessionId: string, turnId: string, since: number, signal: AbortSignal): Promise<ContextReading | null> {
@@ -37,7 +39,13 @@ export async function compactContext(sessionId: string, model: string, messages:
   if (!response.ok) throw new Error(data.error || `HTTP ${response.status}`);
   if (typeof data.message !== 'string') throw new Error('未收到压缩回执');
   const tokens = data.insight?.estimatedTokens;
-  return { message: data.message as string, reading: typeof tokens === 'number' ? { tokens, estimated: true } : null };
+  const byCategory = data.insight?.byCategory;
+  return {
+    message: data.message as string,
+    reading: typeof tokens === 'number'
+      ? { tokens, estimated: true, ...(byCategory ? { byCategory } : {}) }
+      : null,
+  };
 }
 
 export interface HandoffResponse {
@@ -128,6 +136,7 @@ export async function* streamChat(
       workspace: opts.workspace, taskRun: opts.taskRun,
       sessionId: opts.sessionId, turnId: opts.turnId,
       handoff: opts.handoff, parentSessionId: opts.parentSessionId,
+      permission: opts.permission,
     }),
     signal: opts.signal,
   });
@@ -172,6 +181,97 @@ export async function steerChat(
   });
   if (!r.ok) return { ok: false, injected: false };
   return r.json() as Promise<{ ok: boolean; injected: boolean }>;
+}
+
+/** /btw 只读旁路问答：独立 SSE 流，不落库、不调工具、不干扰主会话 */
+export async function* streamBtw(
+  messages: ChatMessage[],
+  opts: { model?: string; workspace?: string | null; signal?: AbortSignal } = {},
+): AsyncGenerator<AgentEvent> {
+  const resp = await fetch('/api/chat/btw', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ messages, model: opts.model, workspace: opts.workspace }),
+    signal: opts.signal,
+  });
+  if (!resp.ok) {
+    throw new Error(`HTTP ${resp.status}: ${(await resp.text()).slice(0, 200)}`);
+  }
+  const reader = resp.body?.getReader();
+  if (!reader) throw new Error('响应无流');
+  const decoder = new TextDecoder();
+  let buffer = '';
+  while (true) {
+    const { done, value } = await reader.read();
+    if (done) break;
+    buffer += decoder.decode(value, { stream: true });
+    let idx: number;
+    while ((idx = buffer.indexOf('\n\n')) >= 0) {
+      const raw = buffer.slice(0, idx);
+      buffer = buffer.slice(idx + 2);
+      for (const line of raw.split('\n')) {
+        if (!line.startsWith('data:')) continue;
+        try {
+          yield JSON.parse(line.slice(5).trim()) as AgentEvent;
+        } catch { /* 跳过坏包 */ }
+      }
+    }
+  }
+}
+
+/** 权限确认卡决策回执 */
+export async function approvePermissionApi(
+  sessionId: string,
+  id: string,
+  decision: PermissionDecision,
+): Promise<{ ok: boolean; decision?: PermissionDecision }> {
+  const r = await fetch('/api/chat/approve', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ sessionId, id, decision }),
+  });
+  if (!r.ok) return { ok: false };
+  return r.json() as Promise<{ ok: boolean; decision?: PermissionDecision }>;
+}
+
+/** 专用权限更新接口（只改 meta.permission，不碰 messages） */
+export async function updateSessionPermissionApi(
+  sessionId: string,
+  permission: SessionPermission,
+): Promise<{ ok: boolean; permission?: SessionPermission; error?: string }> {
+  const r = await fetch(`/api/sessions/${encodeURIComponent(sessionId)}/permission`, {
+    method: 'PATCH',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ permission }),
+  });
+  return r.json() as Promise<{ ok: boolean; permission?: SessionPermission; error?: string }>;
+}
+
+/** 导出单个会话为 JSON 文件 */
+export function exportSessionUrl(sessionId: string): string {
+  return `/api/sessions/${encodeURIComponent(sessionId)}/export`;
+}
+
+/** 批量/单个导入会话 JSON（服务端事务写入，绝不覆盖已有 id） */
+export async function importSessionsApi(
+  rawText: string,
+): Promise<{ ok: boolean; count: number; imported: SessionSummary[]; error?: string }> {
+  const r = await fetch('/api/sessions/import', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: rawText,
+  });
+  const d = await r.json().catch(() => ({}));
+  if (!r.ok) throw new Error(d.error || `导入失败（HTTP ${r.status}）`);
+  return d as { ok: boolean; count: number; imported: SessionSummary[] };
+}
+
+/** 获取单个会话的轻量轮次轨迹 */
+export async function getTurnTracesApi(sessionId: string, signal?: AbortSignal): Promise<TurnTrace[]> {
+  const r = await fetch(`/api/traces/${encodeURIComponent(sessionId)}`, { signal });
+  if (!r.ok) return [];
+  const d = (await r.json()) as { traces?: TurnTrace[] };
+  return Array.isArray(d.traces) ? d.traces : [];
 }
 
 /** 会话标题：第二次模型调用。失败返回空串，调用方保留字符串兜底标题。 */
@@ -235,6 +335,22 @@ export async function getSession(id: string): Promise<Session | null> {
   const s = (await r.json()) as Session;
   // 老会话的 content 是字符串 + tools 数组（块模型之前写的），读进来先归一化
   return { ...s, messages: (s.messages || []).map((m) => normalizeMessage(m as unknown as Record<string, unknown>)) };
+}
+
+/** 历史消息正文检索（后端扫描 user/assistant 文本块） */
+export async function searchSessionsApi(
+  q: string,
+  opts: { workspace?: string; limit?: number; signal?: AbortSignal } = {},
+): Promise<SessionSearchResult[]> {
+  const query = q.trim();
+  if (!query) return [];
+  const params = new URLSearchParams({ q: query });
+  if (opts.workspace) params.set('workspace', opts.workspace);
+  if (opts.limit) params.set('limit', String(opts.limit));
+  const r = await fetch(`/api/sessions/search?${params}`, { signal: opts.signal });
+  if (!r.ok) return [];
+  const d = (await r.json()) as { results?: SessionSearchResult[] };
+  return Array.isArray(d.results) ? d.results : [];
 }
 
 /** 回滚文件：把 beforeTs 之后 AI 改过的文件还原（编辑消息重发前调用） */

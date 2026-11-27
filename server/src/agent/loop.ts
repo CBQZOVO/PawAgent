@@ -24,10 +24,12 @@ export function createPawToolRuntime(
     workspace?: string | null;
     parentSessionId?: string;
     connectionCode?: string;
+    authorize?: ToolRuntime['authorize'];
   } = {},
 ): ToolRuntime {
   return {
     getSchemas: () => getAllToolSchemas(opts.workspace, { hasParentSession: !!opts.parentSessionId }),
+    authorize: opts.authorize,
     execute: (name, args, toolCallId, ctx) => executeTool(name, args, toolCallId, {
       signal: ctx.signal,
       workspace: opts.workspace,
@@ -40,6 +42,7 @@ export function createPawToolRuntime(
       emit: ctx.emit,
       parentMessages: ctx.parentMessages,
       outputSchema: ctx.outputSchema,
+      authorize: opts.authorize,
     }),
     isReadOnly: (name) => pawPlugins.isReadOnly(name),
     isMutating: (name, args) => pawPlugins.isMutating(name, args),
@@ -74,6 +77,7 @@ export interface RunAgentOptions {
   unattended?: boolean;
   outputSchema?: Record<string, unknown>;
   drainSteering?: () => string[];
+  authorize?: ToolRuntime['authorize'];
 }
 
 export async function* runAgent(
@@ -81,7 +85,7 @@ export async function* runAgent(
   input: ChatMessage[],
   options: RunAgentOptions = {},
 ): AsyncGenerator<AgentEvent> {
-  const { workspace, systemOverride, parentSessionId, connectionCode } = options;
+  const { workspace, systemOverride, parentSessionId, connectionCode, authorize } = options;
   const persona = systemOverride ? '' : await loadPersonaPrompt(workspace);
   let resolvedSystemOverride = systemOverride;
   if (systemOverride) {
@@ -89,7 +93,7 @@ export async function* runAgent(
     resolvedSystemOverride = systemOverride + (wsBlock ? '\n\n' + wsBlock : '');
   }
   const provider: StreamChatFn = (s) => streamChat(cfg, s.messages, s.tools, s.images, s.signal);
-  const tools = createPawToolRuntime(cfg, { workspace, parentSessionId, connectionCode });
+  const tools = createPawToolRuntime(cfg, { workspace, parentSessionId, connectionCode, authorize });
 
   yield* kernelRunAgent({
     streamChat: provider,

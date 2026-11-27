@@ -149,4 +149,79 @@ assert.equal(rtRes.isError, false);
   assert.deepEqual(steerEvents, ['user_steer']);
 }
 
+// context_usage：预估事件与拿到真实 usage.prompt 的二次事件均必须携带 byCategory
+{
+  const readings: Array<{ tokens: number; estimated: boolean; byCategory?: Record<string, number> }> = [];
+  const usageStream: StreamChatFn = async function* () {
+    yield { content: 'ok', usage: { prompt: 321, completion: 12 } };
+  };
+  for await (const ev of runAgent({
+    streamChat: usageStream,
+    model: 'demo-model',
+    tools: { getSchemas: () => [], execute: async () => ({ tool_call_id: '', content: '' }) },
+    input: [{ role: 'user', content: 'hello context breakdown' }],
+    systemPrompt: 'you are paw',
+  })) {
+    if (ev.type === 'context_usage') readings.push(ev.reading);
+  }
+  assert.equal(readings.length, 2, '应依次产出预估与实测两次 context_usage');
+  assert.equal(readings[0].estimated, true);
+  assert.ok(readings[0].byCategory, '预估事件应携带 byCategory');
+  const estSum = Object.values(readings[0].byCategory!).reduce((a, b) => a + b, 0);
+  assert.equal(estSum, readings[0].tokens, 'estimated=true 时 byCategory 之和应等于 tokens');
+  assert.equal(readings[1].estimated, false);
+  assert.equal(readings[1].tokens, 321);
+  assert.deepEqual(readings[1].byCategory, readings[0].byCategory, '真实 usage 事件不得冲掉 byCategory');
+}
+
+// authorize：允许/拒绝决策、rejectedByUser 豁免 errorRounds 失败护栏，以及 done.rounds
+{
+  let roundNum = 0;
+  let sawFailureReminder = false;
+  let executedCount = 0;
+  let doneRounds: number | undefined;
+  const authStream: StreamChatFn = async function* ({ messages }) {
+    roundNum++;
+    if (roundNum === 1) {
+      yield {
+        toolCalls: [{ index: 0, id: 'auth-deny-1', name: 'danger_op', arguments: '{"path":"a.txt"}' }],
+        finishReason: 'tool_calls',
+      };
+      return;
+    }
+    if (roundNum === 2) {
+      sawFailureReminder = messages.some((m) => m.role === 'tool' && m.content.includes('本轮工具失败'));
+      yield {
+        toolCalls: [{ index: 0, id: 'auth-allow-2', name: 'safe_op', arguments: '{}' }],
+        finishReason: 'tool_calls',
+      };
+      return;
+    }
+    yield { content: '已按权限决策完成' };
+  };
+  for await (const ev of runAgent({
+    streamChat: authStream,
+    model: 'demo-model',
+    tools: {
+      getSchemas: () => [
+        { name: 'danger_op', description: 'd', parameters: { type: 'object', properties: {} } },
+        { name: 'safe_op', description: 's', parameters: { type: 'object', properties: {} } },
+      ],
+      authorize: async (name) => name === 'danger_op'
+        ? { decision: 'deny', reason: '测试拒绝', rejectedByUser: true }
+        : { decision: 'allow' },
+      execute: async (name, _args, id) => {
+        executedCount++;
+        return { tool_call_id: id, content: `ran:${name}` };
+      },
+    },
+    input: [{ role: 'user', content: 'test auth' }],
+  })) {
+    if (ev.type === 'done') doneRounds = ev.rounds;
+  }
+  assert.equal(executedCount, 1, '被拒绝的工具不得真正执行');
+  assert.equal(sawFailureReminder, false, '用户主动拒绝不应触发 errorRounds 失败重试提醒');
+  assert.equal(doneRounds, 3, 'done 事件应上报准确的模型轮次数');
+}
+
 console.log('✓ @paw/kernel standalone tests passed');

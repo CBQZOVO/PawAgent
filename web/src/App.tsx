@@ -1,8 +1,8 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { ArrowDown, ArrowLeft, ArrowRight, ArrowRightLeft, ChevronUp, Eye, Globe, Maximize2, Minimize2, PanelLeftClose, PanelLeftOpen, Sparkles } from 'lucide-react';
-import { messageText, type AgentEvent, type Attachment, type ContextReading, type HandoffContext, type ScheduledTask, type ViewMessage, type WidgetBlock } from '@paw/shared';
+import { messageText, type AgentEvent, type Attachment, type ContextReading, type HandoffContext, type PermissionDecision, type ScheduledTask, type SessionPermission, type TurnTrace, type ViewMessage, type WidgetBlock } from '@paw/shared';
 import {
-  compactContext, createHandoff, generateTitleApi, getModels, getPlugins, getSearchConfig, getSession, getWorkspace, notifyTurnEnd, removeWorkspace as removeWorkspaceApi, resolveBusinessPage, rewindFiles, setSearchConfig, setWorkspace, steerChat, streamChat,
+  approvePermissionApi, compactContext, createHandoff, exportSessionUrl, generateTitleApi, getModels, getPlugins, getSearchConfig, getSession, getTurnTracesApi, getWorkspace, importSessionsApi, notifyTurnEnd, removeWorkspace as removeWorkspaceApi, resolveBusinessPage, rewindFiles, setSearchConfig, setWorkspace, steerChat, streamBtw, streamChat, updateSessionPermissionApi,
   PLUGINS_CHANGED, WORKSPACE_CHANGED, type ModelInfo, type PluginPageInfo, type SearchProvider, type WidgetInfo,
 } from './api/client';
 import { widgetBlockFromEvent } from './lib/session-sync';
@@ -11,8 +11,10 @@ import { extractSkillRefs } from './lib/skill-refs';
 import { toChatMessages } from './lib/store';
 import { useAttachments } from './hooks/useAttachments';
 import { useSessions } from './hooks/useSessions';
-import Composer, { type QueuedMessage } from './components/Composer';
+import Composer, { type BtwState, type QueuedMessage } from './components/Composer';
 import MessageRow from './components/MessageRow';
+import type { PermissionAskItem } from './components/PermissionCard';
+import TracePanel from './components/TracePanel';
 import Sidebar from './components/Sidebar';
 import TaskPanel from './components/TaskPanel';
 import ToolsPage from './components/ToolsPage';
@@ -58,7 +60,7 @@ export default function App() {
   // 会话（SQLite + localStorage）
   const {
     sessions, setSessions, activeId, setActiveId: setActiveIdRaw, ready, ensureLoaded,
-    createSession, deleteSession, applyEvent, applyEvents,
+    createSession, deleteSession, applyEvent, applyEvents, syncSessionPermission, applyImportedSessions,
   } = useSessions();
 
   // 输入/状态
@@ -94,6 +96,15 @@ export default function App() {
   const [modelsRefreshing, setModelsRefreshing] = useState(false);
   const modelsRefreshingRef = useRef(false);
   const [modelSearch, setModelSearch] = useState('');
+  const [jumpTarget, setJumpTarget] = useState<{ sessionId: string; messageId: string; seq: number } | null>(null);
+  const [btwMode, setBtwMode] = useState(false);
+  const [btwState, setBtwState] = useState<BtwState | null>(null);
+  const btwAbortRef = useRef<AbortController | null>(null);
+  const [permissionAsks, setPermissionAsks] = useState<Map<string, PermissionAskItem[]>>(new Map());
+  const permissionAsksRef = useRef(permissionAsks);
+  permissionAsksRef.current = permissionAsks;
+  const pendingPermCountRef = useRef<Map<string, number>>(new Map());
+  const [traceView, setTraceView] = useState<{ trace: TurnTrace | null; loading: boolean } | null>(null);
   // 按会话隔离的输入草稿与模型选择：切走时保存当前会话的，切回时恢复目标会话的，互不串扰
   const draftsRef = useRef<Map<string, string>>(new Map());
   const sessionModelsRef = useRef<Map<string, string>>(new Map());
@@ -573,6 +584,10 @@ export default function App() {
     let lastEventAt = Date.now();
     let watchdogFired = false;
     const watchdog = setInterval(() => {
+      if ((pendingPermCountRef.current.get(targetId!) || 0) > 0) {
+        lastEventAt = Date.now();
+        return;
+      }
       if (Date.now() - lastEventAt > 360_000) { watchdogFired = true; ctrl.abort(); }
     }, 30_000);
     let sawDone = false;
@@ -602,6 +617,7 @@ export default function App() {
         workspace: ws, taskRun: runId && taskId ? { taskId, runId } : undefined,
         sessionId: targetId, turnId: userMsg.id,
         handoff, parentSessionId,
+        permission: existingSession?.permission,
       })) {
         lastEventAt = Date.now();
         if (ev.type === 'text') textChars += (ev.delta || '').trim().length;
@@ -612,6 +628,32 @@ export default function App() {
             next.set(targetId!, { turnId: userMsg.id, reading: ev.reading });
             return next;
           });
+          continue;
+        }
+        if (ev.type === 'permission_ask') {
+          flushEvents();
+          pendingPermCountRef.current.set(targetId!, (pendingPermCountRef.current.get(targetId!) || 0) + 1);
+          const item: PermissionAskItem = {
+            id: ev.id,
+            sessionId: targetId!,
+            messageId: assistantMsg.id,
+            toolCallId: ev.toolCallId,
+            tool: ev.tool,
+            title: ev.title,
+            detail: ev.detail,
+            options: ev.options,
+            status: 'pending',
+          };
+          setPermissionAsks((prev) => {
+            const next = new Map(prev);
+            const cur = next.get(assistantMsg.id) || [];
+            next.set(assistantMsg.id, [...cur, item]);
+            return next;
+          });
+          continue;
+        }
+        if (ev.type === 'permission_updated') {
+          syncSessionPermission(targetId!, ev.permission);
           continue;
         }
         if ((ev.type === 'done' || ev.type === 'ask') && !sawDone && !sawAsk) {
@@ -719,6 +761,14 @@ export default function App() {
     } finally {
       flushEvents();
       clearInterval(watchdog);
+      pendingPermCountRef.current.delete(targetId!);
+      setPermissionAsks((prev) => {
+        const cur = prev.get(assistantMsg.id);
+        if (!cur?.some((a) => a.status === 'pending')) return prev;
+        const next = new Map(prev);
+        next.set(assistantMsg.id, cur.map((a) => a.status === 'pending' ? { ...a, status: 'cancelled' } : a));
+        return next;
+      });
       if (sawError && !sawDone && !sawAsk && !ctrl.signal.aborted && !document.hasFocus()) {
         void notifyTurnEnd('error').catch(() => {});
       }
@@ -872,6 +922,34 @@ export default function App() {
     });
   };
 
+  // 从侧栏历史消息搜索跳转：若目标消息在分页窗口之前先展开窗口，再滚动定位并短暂高亮
+  useEffect(() => {
+    if (!jumpTarget || activeId !== jumpTarget.sessionId || !active?.messages.length) return;
+    const idx = active.messages.findIndex((m) => m.id === jumpTarget.messageId);
+    if (idx < 0) return;
+    if (idx < msgStart) {
+      setLoadedFrom(Math.max(0, idx - 2));
+      return;
+    }
+    const targetMsgId = jumpTarget.messageId;
+    const raf = requestAnimationFrame(() => {
+      const container = bottom.ref.current;
+      const escaped = typeof CSS !== 'undefined' && typeof CSS.escape === 'function'
+        ? CSS.escape(targetMsgId)
+        : targetMsgId.replace(/"/g, '\\"');
+      const node = container?.querySelector(`[data-message-id="${escaped}"]`) as HTMLElement | null;
+      if (node) {
+        node.scrollIntoView({ behavior: 'smooth', block: 'center' });
+        node.classList.remove('msg-jump-highlight');
+        void node.offsetWidth;
+        node.classList.add('msg-jump-highlight');
+        setTimeout(() => node.classList.remove('msg-jump-highlight'), 1800);
+      }
+      setJumpTarget(null);
+    });
+    return () => cancelAnimationFrame(raf);
+  }, [jumpTarget, activeId, active?.messages, msgStart]);
+
   const compact = async (sid: string) => {
     if (!sid) {
       setCompactNotice({ sid, text: '当前会话还没有可压缩的消息' });
@@ -972,9 +1050,147 @@ export default function App() {
     void ensureLoaded(targetSid);
   };
 
+  const runBtw = async (question: string) => {
+    const q = question.trim();
+    if (!q) return;
+    btwAbortRef.current?.abort();
+    const ctrl = new AbortController();
+    btwAbortRef.current = ctrl;
+    setBtwState({ question: q, answer: '', streaming: true });
+    try {
+      const rawMessages = active?.messages ?? [];
+      // 若主会话正在流式执行，最后一条未完成的 assistant 消息可能带半截 tool-call，跳过它避免结构非法
+      const completedMessages = activeId && runningIds.has(activeId) && rawMessages.at(-1)?.role === 'assistant'
+        ? rawMessages.slice(0, -1)
+        : rawMessages;
+      const historyMsgs = toChatMessages(completedMessages.slice(-12));
+      if (historyMsgs.at(-1)?.role === 'user') {
+        historyMsgs.push({ role: 'assistant', content: '（当前主任务正在执行中）' });
+      }
+      const payload = [...historyMsgs, { role: 'user' as const, content: q }];
+      for await (const ev of streamBtw(payload, {
+        model: model || undefined,
+        workspace: active?.workspace ?? null,
+        signal: ctrl.signal,
+      })) {
+        if (ctrl.signal.aborted) break;
+        if (ev.type === 'text') {
+          setBtwState((prev) => prev ? { ...prev, answer: prev.answer + ev.delta } : prev);
+        } else if (ev.type === 'error') {
+          setBtwState((prev) => prev ? { ...prev, error: ev.message, streaming: false } : prev);
+        }
+      }
+      setBtwState((prev) => prev ? { ...prev, streaming: false } : prev);
+    } catch (e) {
+      if (ctrl.signal.aborted) {
+        setBtwState((prev) => prev ? { ...prev, streaming: false } : prev);
+      } else {
+        setBtwState((prev) => prev ? { ...prev, error: (e as Error).message, streaming: false } : prev);
+      }
+    } finally {
+      if (btwAbortRef.current === ctrl) btwAbortRef.current = null;
+    }
+  };
+
+  const handleExportSession = (sid: string) => {
+    const a = document.createElement('a');
+    a.href = exportSessionUrl(sid);
+    a.download = '';
+    document.body.appendChild(a);
+    a.click();
+    a.remove();
+  };
+
+  const handleImportSessions = async (file: File) => {
+    setError('');
+    try {
+      const text = await file.text();
+      const res = await importSessionsApi(text);
+      applyImportedSessions(res.imported);
+      if (res.imported.length) {
+        setCompactNotice({ sid: currentSession.current, text: `已导入 ${res.imported.length} 个会话` });
+      }
+    } catch (e) {
+      setError((e as Error).message || '导入会话失败');
+    }
+  };
+
+  const handleToggleStrict = async (sid: string) => {
+    const s = sessions.find((x) => x.id === sid);
+    if (!s) return;
+    const nextPerm: SessionPermission = {
+      mode: s.permission?.mode === 'strict' ? 'default' : 'strict',
+      allow: s.permission?.allow ?? [],
+      deny: s.permission?.deny ?? [],
+    };
+    try {
+      const r = await updateSessionPermissionApi(sid, nextPerm);
+      if (r.ok && r.permission) {
+        syncSessionPermission(sid, r.permission);
+        return;
+      }
+      // 新建会话尚未经过 800ms 防抖落库时服务端尚无行：直接改本地状态，随首次防抖一并落库
+      if (r.error === '会话不存在') {
+        setSessions((prev) => prev.map((x) => x.id === sid ? { ...x, permission: nextPerm } : x));
+        return;
+      }
+      throw new Error(r.error || '更新权限失败');
+    } catch (e) {
+      setError((e as Error).message || '更新权限失败');
+    }
+  };
+
+  const handleDecidePermission = async (askId: string, decision: PermissionDecision) => {
+    let target: PermissionAskItem | undefined;
+    for (const list of permissionAsksRef.current.values()) {
+      const hit = list.find((a) => a.id === askId && a.status === 'pending');
+      if (hit) { target = hit; break; }
+    }
+    if (!target) return;
+    const status = decision === 'allow_once' || decision === 'allow_session' ? 'allowed' : 'denied';
+    setPermissionAsks((prev) => {
+      const cur = prev.get(target!.messageId);
+      if (!cur) return prev;
+      const next = new Map(prev);
+      next.set(target!.messageId, cur.map((a) => a.id === askId ? { ...a, status, decision } : a));
+      return next;
+    });
+    const curCount = pendingPermCountRef.current.get(target.sessionId) || 0;
+    if (curCount <= 1) pendingPermCountRef.current.delete(target.sessionId);
+    else pendingPermCountRef.current.set(target.sessionId, curCount - 1);
+    await approvePermissionApi(target.sessionId, askId, decision).catch(() => {});
+  };
+
+  const handleOpenTrace = async (sid: string, turnId: string) => {
+    setTraceView({ trace: null, loading: true });
+    try {
+      const traces = await getTurnTracesApi(sid);
+      const hit = traces.find((t) => t.turnId === turnId) ?? null;
+      setTraceView({ trace: hit, loading: false });
+    } catch {
+      setTraceView({ trace: null, loading: false });
+    }
+  };
+
   /** Enter 直接使用编辑器提交的最新文本。 */
   const send = (override?: string) => {
     const rawText = (override ?? input).trim();
+    // /btw 只读旁路问答：主会话忙碌时也允许直接并行提问，绝不入队、不进主对话
+    const isBtwCmd = !attachments.length && (rawText === '/btw' || rawText.startsWith('/btw '));
+    if (isBtwCmd || (btwMode && !attachments.length && rawText)) {
+      const q = isBtwCmd ? rawText.slice('/btw'.length).trim() : rawText;
+      if (!q) {
+        setBtwMode((v) => !v);
+        setInput('');
+        inputRef.current = '';
+        return;
+      }
+      setInput('');
+      inputRef.current = '';
+      void runBtw(q);
+      focusRef.current?.focus();
+      return;
+    }
     // 粘贴场景：文本里可能带 @skill:xxx（从 Paw 另一个对话复制来的），解析成真正技能
     const parsed = extractSkillRefs(rawText);
     const text = parsed.text;
@@ -1214,12 +1430,18 @@ export default function App() {
       <Sidebar
         sessions={sessions} activeId={activeId} runningIds={runningIds} provider={provider} hasKey={hasKey} providerMenu={providerMenu}
         onNew={onNew}
-        onSelect={(id) => {
+        onSelect={(id, messageId) => {
           const s = sessions.find((x) => x.id === id);
           nextWorkspaceRef.current = null;
           switchSession(id);
           setPage('chat');
           if (s) void setWorkspace(s.workspace ?? null); // 续聊沿用会话自己的工作区
+          if (messageId) {
+            setJumpTarget({ sessionId: id, messageId, seq: Date.now() });
+            void ensureLoaded(id);
+          } else {
+            setJumpTarget(null);
+          }
         }}
         onNewInWorkspace={onNewInWorkspace}
         onDelete={(id) => {
@@ -1235,6 +1457,9 @@ export default function App() {
           deleteSession(id);
         }}
         onHandoffSession={(id) => void handoff(id)}
+        onExportSession={handleExportSession}
+        onImportSessions={(file) => void handleImportSessions(file)}
+        onToggleStrict={(id) => void handleToggleStrict(id)}
         onProviderToggle={() => setProviderMenu((v) => !v)} onProviderClose={() => setProviderMenu(false)} onProviderSwitch={(p) => void switchProvider(p)}
         onTasks={() => { setTasksTab('tasks'); setPage('tasks'); }}
         onMemory={() => setPage('memory')}
@@ -1413,6 +1638,9 @@ export default function App() {
                 )}
                 {active.messages.slice(msgStart).map((m, i) => {
                   const gi = msgStart + i; // 在全量列表里的下标（streaming 判断要用）
+                  const turnUserMsg = m.role === 'assistant' && gi > 0 && active.messages[gi - 1]?.role === 'user'
+                    ? active.messages[gi - 1]
+                    : undefined;
                   return <MessageRow key={m.id} m={m} fallbackModel={model}
                     streaming={runningIds.has(activeId) && gi === msgTotal - 1 && m.role === 'assistant'}
                     onOpenSession={(id) => void openSubagentSession(id, active.id)}
@@ -1429,6 +1657,9 @@ export default function App() {
                     onRewind={runningIds.has(active.id) ? undefined : (text, atts) => rewindTo(active.id, m.id, text, atts)}
                     onRevert={() => setRevertAsk({ sid: active.id, msgId: m.id })}
                     onAnswerAsk={(text) => void answerAsk(active.id, text)}
+                    permissionAsks={permissionAsks.get(m.id)}
+                    onDecidePermission={(id, dec) => void handleDecidePermission(id, dec)}
+                    onOpenTrace={turnUserMsg ? () => void handleOpenTrace(active.id, turnUserMsg.id) : undefined}
                     widgetHost={widgetHost} />;
                 })}
                 {active.handoffTo && (
@@ -1473,6 +1704,11 @@ export default function App() {
           onOpenHandoffSource={(sid) => void openLinkedSession(sid)}
           onCompact={() => void compact(activeId)}
           onHandoff={() => void handoff(activeId)}
+          btwMode={btwMode}
+          onToggleBtw={() => setBtwMode((v) => !v)}
+          btwState={btwState}
+          onStopBtw={() => { btwAbortRef.current?.abort(); }}
+          onCloseBtw={() => { btwAbortRef.current?.abort(); setBtwState(null); }}
           input={input} attachments={attachments} readingFiles={readingFiles} busy={runningIds.has(activeId)} model={model} models={models}
           modelMenu={modelMenu} modelSearch={modelSearch} modelsRefreshing={modelsRefreshing}
           selectedSkills={selectedSkills} focusRef={focusRef}
@@ -1541,6 +1777,7 @@ export default function App() {
         )}
       </main>
       {taskPanel && <TaskPanel onClose={() => setTaskPanel(false)} onRunInChat={runTaskInChat} />}
+      {traceView && <TracePanel trace={traceView.trace} loading={traceView.loading} onClose={() => setTraceView(null)} />}
       {revertAsk && (
         <ConfirmDialog
           title="将对话回退到此消息前？"

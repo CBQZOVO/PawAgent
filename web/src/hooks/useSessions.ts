@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
-import { type AgentEvent, type Session } from '@paw/shared';
+import { type AgentEvent, type Session, type SessionPermission, type SessionSummary } from '@paw/shared';
 import { delSession, getSession, getSessions, putSessions } from '../api/client';
 import { loadSessions, saveSessions } from '../lib/store';
 import { applyEventsToMessage, mergeSessions } from '../lib/session-sync';
@@ -225,8 +225,34 @@ export function useSessions() {
     } : s));
   }, []);
 
+  /** 同步服务端已落库的权限变更：直接更新内存与基线快照，不标 dirty，避免 800ms PUT 回写冲突 */
+  const syncSessionPermission = useCallback((sid: string, permission: SessionPermission) => {
+    setSessions((prev) => prev.map((s) => {
+      if (s.id !== sid) return s;
+      const next: Session = { ...s, permission };
+      snapshotRef.current.set(sid, next);
+      return next;
+    }));
+  }, []);
+
+  /** 导入会话后把服务端返回的新摘要并入列表并登记为可推送，不标 dirty */
+  const applyImportedSessions = useCallback((imported: SessionSummary[]) => {
+    if (!imported.length) return;
+    const fresh: Session[] = imported.map((s) => ({ ...s, messages: [] }));
+    for (const s of fresh) {
+      pushableRef.current.add(s.id);
+      snapshotRef.current.set(s.id, s);
+    }
+    setSessions((prev) => {
+      const existing = new Set(prev.map((x) => x.id));
+      const added = fresh.filter((s) => !existing.has(s.id));
+      return [...added, ...prev].sort((a, b) => b.updatedAt - a.updatedAt);
+    });
+  }, []);
+
   return {
     sessions, setSessions, activeId, setActiveId, ready, ensureLoaded,
     createSession, deleteSession, applyEvent, applyEvents, appendMessages,
+    syncSessionPermission, applyImportedSessions,
   };
 }

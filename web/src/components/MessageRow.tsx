@@ -1,6 +1,6 @@
 import { memo, useEffect, useState } from 'react';
-import { ArrowRightLeft, Brain, Check, ChevronDown, Copy, CornerUpLeft, FileText, Link2, Pencil, Sparkles } from 'lucide-react';
-import { messageText, splitAttachmentPlaceholders, type ContentBlock, type ToolCallBlock, type ViewMessage } from '@paw/shared';
+import { Activity, ArrowRightLeft, Brain, Check, ChevronDown, Copy, CornerUpLeft, FileText, Link2, Pencil, Sparkles } from 'lucide-react';
+import { messageText, splitAttachmentPlaceholders, type ContentBlock, type PermissionDecision, type ToolCallBlock, type ViewMessage } from '@paw/shared';
 import { extractSources } from '../lib/search-results';
 import { extractSkillRefs } from '../lib/skill-refs';
 import { attachmentKey } from '../lib/attachments';
@@ -10,6 +10,7 @@ import MessageEditor from './composer/MessageEditor';
 import SourcesBlock from './SourcesBlock';
 import ToolCard from './ToolCard';
 import AskCard from './AskCard';
+import PermissionCard, { type PermissionAskItem } from './PermissionCard';
 import { WidgetCard, type WidgetHostApi } from './WidgetFrame';
 
 /** 纯探查类工具：只读、无副作用，连续多个折成一行（见 items 构造处的说明） */
@@ -43,7 +44,7 @@ function foldLabel(group: ToolCallBlock[]): string {
   }
 }
 
-function MessageRow({ m, fallbackModel, streaming, onOpenSession, onPreviewAttachment, onPreviewFile, onRewind, onRevert, onAnswerAsk, widgetHost }: {  m: ViewMessage;
+function MessageRow({ m, fallbackModel, streaming, onOpenSession, onPreviewAttachment, onPreviewFile, onRewind, onRevert, onAnswerAsk, widgetHost, permissionAsks, onDecidePermission, onOpenTrace }: {  m: ViewMessage;
   fallbackModel?: string;
   streaming?: boolean;
   onOpenSession?: (id: string) => void;
@@ -59,6 +60,11 @@ function MessageRow({ m, fallbackModel, streaming, onOpenSession, onPreviewAttac
   onAnswerAsk?: (text: string) => void;
   /** 自定义部件的宿主能力（清单 + 桥接回调） */
   widgetHost?: WidgetHostApi;
+  /** 本条助手消息关联的严格模式权限确认卡 */
+  permissionAsks?: PermissionAskItem[];
+  onDecidePermission?: (id: string, decision: PermissionDecision) => void;
+  /** 点击耗时徽标打开本轮执行轨迹 */
+  onOpenTrace?: () => void;
 }) {
   const [showReasoning, setShowReasoning] = useState(false);
   const [showHandoff, setShowHandoff] = useState(false);
@@ -112,13 +118,13 @@ function MessageRow({ m, fallbackModel, streaming, onOpenSession, onPreviewAttac
     const startEdit = () => setEditing(true);
     if (editing) {
       return (
-        <div className="row user-row">
+        <div className="row user-row" data-message-id={m.id}>
           <MessageEditor text={displayText} attachments={bubbleAtts} onCancel={() => setEditing(false)} onSubmit={onRewind} />
         </div>
       );
     }
     return (
-      <div className="row user-row">
+      <div className="row user-row" data-message-id={m.id}>
         <div className="user-bubble-wrap">
           {m.handoff && (
             <div className={'msg-handoff-card' + (showHandoff ? ' open' : '')}>
@@ -250,7 +256,7 @@ function MessageRow({ m, fallbackModel, streaming, onOpenSession, onPreviewAttac
     items.push({ block: b });
   }
   return (
-    <div className="row assistant-row">
+    <div className="row assistant-row" data-message-id={m.id}>
       {m.reasoning && (
         <div className="reason-block">
           <button className="reason-head" onClick={() => setShowReasoning((v) => !v)}>
@@ -339,14 +345,31 @@ function MessageRow({ m, fallbackModel, streaming, onOpenSession, onPreviewAttac
           </div>
         );
       })}
+      {permissionAsks && permissionAsks.length > 0 && onDecidePermission && (
+        <div className="perm-list">
+          {permissionAsks.map((ask) => (
+            <PermissionCard key={ask.id} ask={ask} onDecide={onDecidePermission} />
+          ))}
+        </div>
+      )}
       {m.error && <div className="msg-error">⚠️ {m.error}</div>}
       {blocks.length > 0 ? (
-        // 底部工具条：生成中标识 + 复制 + 模型名（跟着最后一块走，不跟着正文走）
+        // 底部工具条：生成中标识 + 耗时轨迹入口 + 复制 + 模型名（跟着最后一块走，不跟着正文走）
         <div className="msg-actions">
           {streaming && <span className="generating-hint"><LoadingDots /> 生成中… {fmtDuration(now - m.ts)}</span>}
           {m.stopped && <span className="generating-hint stopped-hint">已停止{m.durationMs ? ` · ${fmtDuration(m.durationMs)}` : ''}</span>}
           {!streaming && !m.stopped && m.durationMs && !turnFold ? (
-            <span className="generating-hint">已完成 {fmtDuration(m.durationMs)}</span>
+            onOpenTrace ? (
+              <button type="button" className="trace-trigger" onClick={onOpenTrace} title="查看本轮执行轨迹与耗时分解">
+                <Activity size={12} /> 已完成 {fmtDuration(m.durationMs)}
+              </button>
+            ) : (
+              <span className="generating-hint">已完成 {fmtDuration(m.durationMs)}</span>
+            )
+          ) : !streaming && !m.stopped && m.durationMs && turnFold && onOpenTrace ? (
+            <button type="button" className="trace-trigger" onClick={onOpenTrace} title="查看本轮执行轨迹与耗时分解">
+              <Activity size={12} /> 轨迹
+            </button>
           ) : null}
           <button className="action-btn" onClick={copy} title={copied ? '已复制' : '复制'}>
             {copied ? <Check size={13} /> : <Copy size={13} />}
@@ -379,4 +402,8 @@ function LoadingDots() {
  * 而 m 变了（新消息、内容更新）一定会重新渲染，不会漏更新。
  */
 export default memo(MessageRow, (a, b) =>
-  a.m === b.m && a.streaming === b.streaming && a.fallbackModel === b.fallbackModel && a.widgetHost === b.widgetHost);
+  a.m === b.m
+  && a.streaming === b.streaming
+  && a.fallbackModel === b.fallbackModel
+  && a.widgetHost === b.widgetHost
+  && a.permissionAsks === b.permissionAsks);

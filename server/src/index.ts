@@ -6,16 +6,26 @@ import { serve } from '@hono/node-server';
 import { serveStatic } from '@hono/node-server/serve-static';
 import path from 'node:path';
 import os from 'node:os';
+import { randomUUID } from 'node:crypto';
 import { chmod, mkdir, readFile, stat, writeFile } from 'node:fs/promises';
-import { canSeeImages, messageText, type ChatRequest, type ScheduledTask, type Session } from '@paw/shared';
+import {
+  canSeeImages, messageText, normalizeMessage,
+  type BtwRequest, type ChatRequest, type PermissionDecision, type ScheduledTask,
+  type Session, type SessionPermission, type SessionSummary, type TurnTrace, type TurnTraceTool,
+} from '@paw/shared';
 import { deleteMemoryById, listMemories, upsertMemoryDirect } from './tools/memory.js';
 import { deleteWorkLog, listWorkLogs, updateWorkLog } from './tools/worklog.js';
 import { reflectTurn } from './reflection.js';
-import { addContextSample, clearSessions, deleteSession, getContextReading, getContextSamples, getSession, listSessionSummaries, upsertSessions } from './db.js';
+import {
+  addContextSample, clearSessions, deleteSession, getContextReading, getContextSamples,
+  getSession, listSessionSummaries, listTurnTraces, parseSessionPermission,
+  searchSessions, updateSessionPermission, upsertSessions, upsertTurnTrace,
+} from './db.js';
 import { isConversationHistory, prepareSessionContext } from './agent/session-context.js';
 import { generateHandoffBrief } from './agent/handoff.js';
 import { loadPersonaPrompt } from './persona.js';
 import { runAgent } from './agent/loop.js';
+import { cancelPendingApprovals, createSessionAuthorizer, hasPendingApproval, resolveApproval } from './agent/permission.js';
 import type { GatewayConfig } from './gateway/client.js';
 import { loadSkillContent, loadSkills, SKILLS_DIR } from './skills.js';
 import { initMcp, mcpServerNames, mcpServerViews, mcpToolSchemas } from './mcp.js';
@@ -425,6 +435,130 @@ app.post('/api/connections/:code/sso/resolve', async (c) => {
 
 // 会话持久化 API（SQLite）。列表只给摘要，消息正文按需取单条（避免全量解析）
 app.get('/api/sessions', (c) => c.json({ sessions: listSessionSummaries() }));
+// 必须注册在 /api/sessions/:id 之前，避免被 :id 吞掉
+app.get('/api/sessions/search', (c) => {
+  const q = (c.req.query('q') || '').trim();
+  if (!q) return c.json({ results: [] });
+  const workspace = c.req.query('workspace') || undefined;
+  const rawLimit = Number(c.req.query('limit'));
+  const limit = Number.isFinite(rawLimit) && rawLimit > 0 ? Math.min(50, Math.floor(rawLimit)) : 50;
+  return c.json({ results: searchSessions(q, { workspace, limit }) });
+});
+app.get('/api/sessions/:id/export', (c) => {
+  const s = getSession(c.req.param('id'));
+  if (!s) return c.json({ error: 'not found' }, 404);
+  const safeTitle = (s.title || 'session').replace(/[\\/:*?"<>|\s]+/g, '-').slice(0, 32) || 'session';
+  const day = new Date().toISOString().slice(0, 10);
+  const filename = `paw-session-${safeTitle}-${day}.json`;
+  c.header('Content-Type', 'application/json; charset=utf-8');
+  c.header('Content-Disposition', `attachment; filename*=UTF-8''${encodeURIComponent(filename)}`);
+  return c.body(JSON.stringify(s, null, 2));
+});
+const MAX_IMPORT_BYTES = 20 * 1024 * 1024;
+const MAX_IMPORT_SESSIONS = 200;
+async function readBoundedUtf8(req: Request, maxBytes: number): Promise<string | null> {
+  if (!req.body) return '';
+  const reader = req.body.getReader();
+  const chunks: Uint8Array[] = [];
+  let total = 0;
+  try {
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      if (value) {
+        total += value.byteLength;
+        if (total > maxBytes) {
+          await reader.cancel().catch(() => {});
+          return null;
+        }
+        chunks.push(value);
+      }
+    }
+  } finally {
+    reader.releaseLock();
+  }
+  return Buffer.concat(chunks, total).toString('utf-8');
+}
+app.post('/api/sessions/import', async (c) => {
+  const cl = Number(c.req.header('content-length') || 0);
+  if (Number.isFinite(cl) && cl > MAX_IMPORT_BYTES) {
+    return c.json({ error: '导入体积超过 20 MB 上限' }, 413);
+  }
+  const raw = await readBoundedUtf8(c.req.raw, MAX_IMPORT_BYTES);
+  if (raw === null) {
+    return c.json({ error: '导入体积超过 20 MB 上限' }, 413);
+  }
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(raw);
+  } catch {
+    return c.json({ error: '导入内容不是合法 JSON' }, 400);
+  }
+  const list: unknown[] = Array.isArray(parsed)
+    ? parsed
+    : (parsed && typeof parsed === 'object' && Array.isArray((parsed as { sessions?: unknown }).sessions))
+      ? (parsed as { sessions: unknown[] }).sessions
+      : (parsed && typeof parsed === 'object' && Array.isArray((parsed as { messages?: unknown }).messages))
+        ? [parsed]
+        : [];
+  if (!list.length) return c.json({ error: '缺少可导入的会话数组' }, 400);
+  if (list.length > MAX_IMPORT_SESSIONS) {
+    return c.json({ error: `单次最多导入 ${MAX_IMPORT_SESSIONS} 个会话` }, 400);
+  }
+
+  const existingIds = new Set(listSessionSummaries().map((s) => s.id));
+  const prepared: Session[] = [];
+  for (let i = 0; i < list.length; i++) {
+    const item = list[i];
+    if (!item || typeof item !== 'object') {
+      return c.json({ error: `第 ${i + 1} 条会话格式无效` }, 400);
+    }
+    const r = item as Record<string, unknown>;
+    if (typeof r.id !== 'string' || !r.id.trim()
+      || typeof r.title !== 'string'
+      || typeof r.updatedAt !== 'number' || !Number.isFinite(r.updatedAt)
+      || !Array.isArray(r.messages)) {
+      return c.json({ error: `第 ${i + 1} 条会话缺少必需字段（id/title/updatedAt/messages）` }, 400);
+    }
+    const collided = existingIds.has(r.id);
+    const id = collided ? randomUUID() : r.id;
+    existingIds.add(id);
+    const baseTitle = r.title.trim() || '未命名会话';
+    const title = collided ? `${baseTitle}（导入）` : baseTitle;
+    const messages = r.messages.map((m) =>
+      normalizeMessage((m && typeof m === 'object' ? m : { role: 'user', content: '' }) as Record<string, unknown>));
+    const permission = parseSessionPermission(r.permission);
+    prepared.push({
+      id,
+      title,
+      messages,
+      updatedAt: r.updatedAt,
+      ...(typeof r.workspace === 'string' && r.workspace ? { workspace: r.workspace } : {}),
+      ...(permission ? { permission } : {}),
+    });
+  }
+  upsertSessions(prepared);
+  const imported: SessionSummary[] = prepared.map((s) => ({
+    id: s.id,
+    title: s.title,
+    updatedAt: s.updatedAt,
+    ...(s.workspace ? { workspace: s.workspace } : {}),
+    ...(s.permission ? { permission: s.permission } : {}),
+  }));
+  return c.json({ ok: true, count: imported.length, imported });
+});
+app.patch('/api/sessions/:id/permission', async (c) => {
+  const id = c.req.param('id');
+  const body = await c.req.json<{ permission?: SessionPermission }>().catch(() => null);
+  const clean = parseSessionPermission(body?.permission);
+  if (!clean) return c.json({ ok: false, error: '无效的权限配置' }, 400);
+  const updated = updateSessionPermission(id, clean);
+  if (!updated) return c.json({ ok: false, error: '会话不存在' }, 404);
+  return c.json({ ok: true, permission: updated });
+});
+app.get('/api/traces/:sessionId', (c) => {
+  return c.json({ traces: listTurnTraces(c.req.param('sessionId')) });
+});
 app.get('/api/sessions/:id', (c) => {
   const s = getSession(c.req.param('id'));
   return s ? c.json(s) : c.json({ error: 'not found' }, 404);
@@ -436,10 +570,13 @@ app.put('/api/sessions', async (c) => {
   return c.json({ ok: true, count: incoming.length });
 });
 app.delete('/api/sessions/:id', (c) => {
-  deleteSession(c.req.param('id'));
+  const id = c.req.param('id');
+  cancelPendingApprovals(id, '会话已删除');
+  deleteSession(id);
   return c.json({ ok: true });
 });
 app.delete('/api/sessions', (c) => {
+  cancelPendingApprovals(undefined, '会话已清空');
   clearSessions();
   return c.json({ ok: true });
 });
@@ -705,6 +842,80 @@ app.post('/api/chat/steer', async (c) => {
   return c.json({ ok: true, injected: true });
 });
 
+app.post('/api/chat/approve', async (c) => {
+  const body = await c.req.json<{ sessionId?: string; id?: string; decision?: PermissionDecision }>().catch(() => null);
+  const sid = String(body?.sessionId || '').trim();
+  const id = String(body?.id || '').trim();
+  const decision = body?.decision;
+  if (!sid || !id || !decision || !['allow_once', 'deny', 'allow_session', 'deny_session'].includes(decision)) {
+    return c.json({ ok: false, error: '参数无效' }, 400);
+  }
+  const r = resolveApproval(sid, id, decision);
+  return c.json({ ok: r.ok, decision: r.effectiveDecision });
+});
+
+// /btw 只读旁路问答：独立轻量通道，零工具、零附件落盘、零复盘、零持久化，支持主会话忙碌时并行问答
+app.post('/api/chat/btw', (c) => {
+  return streamSSE(c, async (stream) => {
+    const abortCtrl = new AbortController();
+    stream.onAbort(() => { abortCtrl.abort(); });
+    let body: BtwRequest;
+    try {
+      body = (await c.req.json()) as BtwRequest;
+    } catch {
+      await stream.writeSSE({ data: JSON.stringify({ type: 'error', message: '请求体不是合法 JSON' }) }).catch(() => {});
+      return;
+    }
+    if (!Array.isArray(body?.messages) || !body.messages.length || !isConversationHistory(body.messages)) {
+      await stream.writeSSE({ data: JSON.stringify({ type: 'error', message: '无效的消息历史' }) }).catch(() => {});
+      return;
+    }
+    const model = body.model || cfg.model;
+    if (isImageModel(model)) {
+      await stream.writeSSE({ data: JSON.stringify({ type: 'error', message: '/btw 只读旁路问答不支持生图模型，请切换对话模型' }) }).catch(() => {});
+      return;
+    }
+    const workspace = body.workspace === undefined ? await getWorkspaceRoot() : body.workspace;
+    try {
+      for await (const ev of runAgent({ ...cfg, model }, body.messages, {
+        signal: abortCtrl.signal,
+        workspace,
+        maxRounds: 1,
+        allowedTools: [],
+        unattended: true,
+        systemOverride: '只读旁路顾问：仅根据已给对话上下文直接回答用户问题，不调用工具、不修改文件、不反问。回答力求准确简洁。',
+      })) {
+        if (abortCtrl.signal.aborted) break;
+        if (ev.type === 'text' || ev.type === 'reasoning' || ev.type === 'done' || ev.type === 'error') {
+          await stream.writeSSE({ data: JSON.stringify(ev) });
+        }
+      }
+    } catch (e) {
+      if (abortCtrl.signal.aborted || stream.aborted) return;
+      await stream.writeSSE({ data: JSON.stringify({ type: 'error', message: (e as Error).message }) });
+    }
+  });
+});
+
+function unionIntervalsMs(intervals: Array<[number, number]>): number {
+  if (!intervals.length) return 0;
+  const sorted = [...intervals].sort((a, b) => a[0] - b[0]);
+  let total = 0;
+  let [curS, curE] = sorted[0];
+  for (let i = 1; i < sorted.length; i++) {
+    const [s, e] = sorted[i];
+    if (s <= curE) {
+      if (e > curE) curE = e;
+    } else {
+      total += Math.max(0, curE - curS);
+      curS = s;
+      curE = e;
+    }
+  }
+  total += Math.max(0, curE - curS);
+  return total;
+}
+
 app.post('/api/chat', (c) => {
   return streamSSE(c, async (stream) => {
     // 前端点停止/断开 SSE → 中断网关上游请求和后续工具轮次（不是只断浏览器连接）
@@ -841,9 +1052,37 @@ app.post('/api/chat', (c) => {
     // 复盘原料：最终回复文本 + 用到的工具名（收尾时提炼记忆和工作日志用）
     let replyText = '';
     const toolNames: string[] = [];
+    // 轻量会话轨迹采集（旁路统计，失败不影响主流程）
+    let firstTextMs: number | undefined;
+    let approvalWaitMs = 0;
+    let rounds = 0;
+    let observedRounds = 0;
+    let finalUsage: { prompt: number; completion: number } | undefined;
+    const activeToolStarts = new Map<string, { name: string; start: number }>();
+    const perToolWaitMs = new Map<string, number>();
+    const traceTools: TurnTraceTool[] = [];
+
+    const sessionPermission = (body.sessionId ? getSession(body.sessionId)?.permission : undefined)
+      ?? parseSessionPermission(body.permission);
+    const authorize = createSessionAuthorizer({
+      sessionId: body.sessionId,
+      turnId: body.turnId,
+      permission: sessionPermission,
+      onWaitMs: (ms, toolCallId) => {
+        approvalWaitMs += ms;
+        perToolWaitMs.set(toolCallId, (perToolWaitMs.get(toolCallId) || 0) + ms);
+      },
+    });
 
     const steerQ: SteerEntry[] = [];
     if (body.sessionId) activeSteerQueues.set(body.sessionId, steerQ);
+    // 等待审批期间每 25 秒发注释心跳，防止中间层或客户端超时断开
+    const keepalive = body.sessionId ? setInterval(() => {
+      if (body.sessionId && hasPendingApproval(body.sessionId, body.turnId) && !abortCtrl.signal.aborted && !stream.aborted) {
+        void stream.write(': keepalive\n\n').catch(() => {});
+      }
+    }, 25_000) : null;
+    keepalive?.unref?.();
     try {
       for await (const ev of runAgent({ ...cfg, model }, composed.messages, {
         images: composed.imageUrls.length ? composed.imageUrls : undefined,
@@ -855,10 +1094,41 @@ app.post('/api/chat', (c) => {
         connectionCode: body.connectionCode,
         rawHistory: body.messages,
         drainSteering: () => (steerQ.length ? steerQ.splice(0).map((e) => e.text) : []),
+        authorize,
       })) {
         if (abortCtrl.signal.aborted) break;
-        if (ev.type === 'text') { replyText += ev.delta; if (runMeta) runOutput += ev.delta; }
-        if (ev.type === 'tool_start') toolNames.push(ev.name);
+        if (ev.type === 'text') {
+          if (firstTextMs === undefined) firstTextMs = Date.now() - t0;
+          replyText += ev.delta;
+          if (runMeta) runOutput += ev.delta;
+        }
+        if (ev.type === 'context_usage' && ev.reading.estimated) observedRounds++;
+        if (ev.type === 'tool_start') {
+          toolNames.push(ev.name);
+          activeToolStarts.set(ev.id, { name: ev.name, start: Date.now() });
+        }
+        if (ev.type === 'tool_done') {
+          const started = activeToolStarts.get(ev.id);
+          activeToolStarts.delete(ev.id);
+          const end = Date.now();
+          const rawStart = started?.start ?? end;
+          const waited = perToolWaitMs.get(ev.id) || 0;
+          const effectiveStart = Math.min(end, rawStart + waited);
+          const rejectedByUser = !ev.ok && ev.output.startsWith('用户拒绝执行 ');
+          traceTools.push({
+            id: ev.id,
+            name: ev.name,
+            start: effectiveStart,
+            end,
+            ms: Math.max(0, end - effectiveStart),
+            ok: ev.ok,
+            ...(rejectedByUser ? { rejectedByUser: true } : {}),
+          });
+        }
+        if (ev.type === 'done') {
+          finalUsage = ev.usage;
+          if (typeof ev.rounds === 'number') rounds = ev.rounds;
+        }
         if (ev.type === 'error') runOk = false;
         const outEv = ev.type === 'error' && ev.message.startsWith('__LIMIT__')
           ? { ...ev, message: ev.message.slice(9) } : ev;
@@ -869,8 +1139,34 @@ app.post('/api/chat', (c) => {
       runOk = false;
       await stream.writeSSE({ data: JSON.stringify({ type: 'error', message: (e as Error).message }) });
     } finally {
+      if (keepalive) clearInterval(keepalive);
+      if (body.sessionId) cancelPendingApprovals(body.sessionId, '本轮已结束', body.turnId);
       if (body.sessionId && activeSteerQueues.get(body.sessionId) === steerQ) {
         activeSteerQueues.delete(body.sessionId);
+      }
+      // 落盘轻量轨迹（失败只打日志，不阻断流收尾）
+      if (body.sessionId && body.turnId) {
+        try {
+          const totalMs = Math.max(0, Date.now() - t0);
+          const toolMs = unionIntervalsMs(traceTools.map((t) => [t.start, t.end]));
+          const modelMs = Math.max(0, totalMs - toolMs - approvalWaitMs);
+          const trace: TurnTrace = {
+            turnId: body.turnId,
+            at: t0,
+            totalMs,
+            ...(firstTextMs !== undefined ? { firstTextMs } : {}),
+            toolMs,
+            approvalWaitMs,
+            modelMs,
+            rounds: rounds || observedRounds || 1,
+            ...(finalUsage ? { usage: finalUsage } : {}),
+            model,
+            tools: traceTools,
+          };
+          upsertTurnTrace(body.sessionId, trace);
+        } catch (err) {
+          console.warn('[trace] 写入轨迹失败：', (err as Error).message);
+        }
       }
       // 若本轮因 done/error/__LIMIT__/abort 提前退出而 steerQ 里仍有未消费的插话，通知前端回滚进队列，绝不静默丢消息
       if (steerQ.length && !stream.aborted) {

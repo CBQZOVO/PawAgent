@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
 import { ArrowRightLeft, Minimize2 } from 'lucide-react';
-import { CONTEXT_WINDOW_TOKENS, type ContextReading, type ViewMessage } from '@paw/shared';
+import { CONTEXT_WINDOW_TOKENS, type ContextCategory, type ContextReading, type ViewMessage } from '@paw/shared';
 import { getContextReading } from '../../api/client';
 import { toChatMessages } from '../../lib/store';
 import Tips from '../Tips';
@@ -13,6 +13,19 @@ interface Props {
   disabled?: boolean;
   onCompact?: () => void;
   onHandoff?: () => void;
+}
+
+const CATEGORY_ITEMS: ReadonlyArray<{ key: keyof ContextCategory; label: string }> = [
+  { key: 'system', label: '系统提示' },
+  { key: 'user', label: '用户消息' },
+  { key: 'assistant', label: '助手回复' },
+  { key: 'tool', label: '工具结果' },
+  { key: 'tools', label: '工具定义' },
+  { key: 'images', label: '图片' },
+];
+
+function formatTokenCount(n: number): string {
+  return n < 1000 ? String(n) : `${Number((n / 1000).toFixed(1))}K`;
 }
 
 export default function ContextMeter({ sessionId, turn, messages, live, disabled, onCompact, onHandoff }: Props) {
@@ -55,10 +68,26 @@ export default function ContextMeter({ sessionId, turn, messages, live, disabled
   }, [reading, turnId, saved, messages]);
   const percent = (used ?? 0) / CONTEXT_WINDOW_TOKENS * 100;
   const fraction = percent > 0 && percent < 0.1 ? '<0.1' : Number(percent.toFixed(1));
-  const count = (used ?? 0) < 1000 ? String(used ?? 0) : `${Number(((used ?? 0) / 1000).toFixed(1))}K`;
+  const count = formatTokenCount(used ?? 0);
   const note = reading?.estimated ? '（估算）' : !reading && turnId ? '（按历史正文估算）' : '';
   const label = used === null ? '正在读取上下文用量' : `${fraction}% · ${count} / ${CONTEXT_WINDOW_TOKENS / 1000}K 上下文已使用${note}`;
   const canAct = !!sessionId && !!messages?.length && !disabled;
+
+  const breakdown = useMemo(() => {
+    const cat = reading?.byCategory;
+    if (!cat) return null;
+    const total = CATEGORY_ITEMS.reduce((sum, item) => sum + Math.max(0, cat[item.key] || 0), 0);
+    if (total <= 0) return null;
+    return {
+      total,
+      rows: CATEGORY_ITEMS.map((item) => {
+        const value = Math.max(0, cat[item.key] || 0);
+        const share = (value / total) * 100;
+        const pctLabel = value > 0 && share < 1 ? '<1%' : `${Math.round(share)}%`;
+        return { ...item, value, share, pctLabel };
+      }),
+    };
+  }, [reading?.byCategory]);
 
   return (
     <div className="context-meter-wrap" ref={wrapRef}>
@@ -84,6 +113,25 @@ export default function ContextMeter({ sessionId, turn, messages, live, disabled
       {open && (
         <div className="context-meter-menu" role="menu">
           <div className="context-meter-stat">{label}</div>
+          {breakdown && (
+            <div className="context-meter-breakdown">
+              {breakdown.rows.map((row) => (
+                <div className="context-meter-row" key={row.key}>
+                  <span className="context-meter-row-label">{row.label}</span>
+                  <span className="context-meter-row-bar">
+                    <span className="context-meter-row-fill" style={{ width: `${Math.min(100, row.share)}%` }} />
+                  </span>
+                  <span className="context-meter-row-val">
+                    {formatTokenCount(row.value)}
+                    <small>{row.pctLabel}</small>
+                  </span>
+                </div>
+              ))}
+              {reading?.estimated === false && (
+                <div className="context-meter-note">总量为网关实测，分项按本地估算占比</div>
+              )}
+            </div>
+          )}
           {onCompact && (
             <button
               type="button"

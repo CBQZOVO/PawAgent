@@ -1,12 +1,13 @@
 import { useEffect, useRef, useState } from 'react';
 import type { RefObject } from 'react';
-import { ArrowRightLeft, ArrowUp, Check, ChevronDown, CornerDownRight, FileText, Image as ImageIcon, Link2, Paperclip, Pencil, Sparkles, Square, Trash2, X } from 'lucide-react';
+import { ArrowRightLeft, ArrowUp, Check, ChevronDown, Copy, CornerDownRight, FileText, HelpCircle, Image as ImageIcon, Link2, Paperclip, Pencil, Sparkles, Square, Trash2, X } from 'lucide-react';
 import type { Attachment, ContextReading, HandoffContext, ViewMessage } from '@paw/shared';
 import { getSkills, type ModelInfo } from '../api/client';
 import ModelMenu from './ModelMenu';
 import WorkspacePicker from './WorkspacePicker';
 import ComposerEditor, { type ComposerFocus } from './composer/ComposerEditor';
 import ContextMeter from './composer/ContextMeter';
+import Markdown from './Markdown';
 
 interface SkillItem { id: string; name: string; description: string }
 
@@ -21,11 +22,19 @@ export interface QueuedMessage {
   createdAt: number;
 }
 
-/** 输入区：队列卡片 + textarea + 附件/技能 chip + 上传/技能/模型/发送 */
+export interface BtwState {
+  question: string;
+  answer: string;
+  streaming: boolean;
+  error?: string;
+}
+
+/** 输入区：队列卡片 + /btw 旁路卡片 + textarea + 附件/技能 chip + 上传/技能/模型/发送 */
 export default function Composer({
   input, attachments, readingFiles, busy, compacting, model, models, modelMenu, modelSearch, modelsRefreshing,
   contextSessionId, contextTurn, contextMessages, contextReading, selectedSkills, selectedConnection, onSelectConnection, focusRef,
   handoffDraft, onUpdateHandoffDraft, onClearHandoffDraft, onOpenHandoffSource, onCompact, onHandoff,
+  btwMode = false, onToggleBtw, btwState = null, onStopBtw, onCloseBtw,
   queuedMessages = [], onSteerQueued, onEditQueued, onDeleteQueued,
   onInput, onAddFiles, onRemoveFile, onSkillPaste, onRestoreAttachment,
   onToggleSkill, onClearSkills,
@@ -58,6 +67,11 @@ export default function Composer({
   onOpenHandoffSource?: (sessionId: string) => void;
   onCompact?: () => void;
   onHandoff?: () => void;
+  btwMode?: boolean;
+  onToggleBtw?: () => void;
+  btwState?: BtwState | null;
+  onStopBtw?: () => void;
+  onCloseBtw?: () => void;
   queuedMessages?: QueuedMessage[];
   onSteerQueued?: (id: string) => void;
   onEditQueued?: (id: string) => void;
@@ -125,10 +139,57 @@ export default function Composer({
   const [dragging, setDragging] = useState(false);
   const [handoffOpen, setHandoffOpen] = useState(false);
   const [queueOpen, setQueueOpen] = useState(true);
-  const canSend = !compacting && !readingFiles && !!(input.trim() || attachments.length || handoffDraft);
+  const [btwCopied, setBtwCopied] = useState(false);
+  const isBtwSend = !attachments.length && (btwMode || input.trim().startsWith('/btw '));
+  const canSend = !compacting && !readingFiles && (btwMode ? !!input.trim() && !attachments.length : !!(input.trim() || attachments.length || handoffDraft));
 
   return (
     <div className="composer-wrap">
+      {btwState && (
+        <div className="btw-card">
+          <div className="btw-head">
+            <HelpCircle size={13} className="btw-icon" />
+            <span className="btw-badge">/btw 只读旁路</span>
+            <span className="btw-q" title={btwState.question}>{btwState.question}</span>
+            <div className="btw-actions">
+              {btwState.answer && !btwState.streaming && (
+                <button
+                  type="button"
+                  className="btw-act-btn"
+                  title={btwCopied ? '已复制' : '复制回答'}
+                  onClick={() => {
+                    navigator.clipboard.writeText(btwState.answer).then(() => {
+                      setBtwCopied(true);
+                      setTimeout(() => setBtwCopied(false), 1500);
+                    }).catch(() => {});
+                  }}
+                >
+                  {btwCopied ? <Check size={12} /> : <Copy size={12} />}
+                </button>
+              )}
+              {btwState.streaming && onStopBtw && (
+                <button type="button" className="btw-act-btn danger" title="停止旁路回答" onClick={onStopBtw}>
+                  <Square size={11} fill="currentColor" />
+                </button>
+              )}
+              {onCloseBtw && (
+                <button type="button" className="btw-act-btn" title="关闭（不进入主对话）" onClick={onCloseBtw}>
+                  <X size={13} />
+                </button>
+              )}
+            </div>
+          </div>
+          <div className="btw-body">
+            {btwState.error ? (
+              <div className="btw-error">⚠️ {btwState.error}</div>
+            ) : btwState.answer ? (
+              <Markdown>{btwState.answer}</Markdown>
+            ) : (
+              <div className="btw-thinking">正在基于当前上下文只读思考…</div>
+            )}
+          </div>
+        </div>
+      )}
       {queuedMessages.length > 0 && (
         <div className="queue-card">
           <button type="button" className="queue-head" onClick={() => setQueueOpen((v) => !v)}>
@@ -268,11 +329,13 @@ export default function Composer({
             onAddFiles(files);
           }}
           placeholder={
-            busy
-              ? '会话进行中，输入内容将排队发送…  Enter 加入队列，Shift+Enter 换行'
-              : isImageModel
-                ? '描述你想画的图…  Enter 生成（可附图片做图生图）'
-                : '给 Paw 发消息…  Enter 发送，Shift+Enter 换行'
+            btwMode
+              ? '只读旁路提问（不调工具、不写入主对话）…  Enter 立即提问'
+              : busy
+                ? '会话进行中，输入内容将排队发送（输入 /btw 可并行只读提问）…  Enter 加入队列'
+                : isImageModel
+                  ? '描述你想画的图…  Enter 生成（可附图片做图生图）'
+                  : '给 Paw 发消息…  Enter 发送，Shift+Enter 换行'
           }
           compactCompletion={!readingFiles && !attachments.length}
           disabled={compacting}
@@ -353,6 +416,16 @@ export default function Composer({
             )}
           </div>
           <WorkspacePicker variant="chip" />
+          {onToggleBtw && (
+            <button
+              type="button"
+              className={'btw-toggle-chip' + (btwMode ? ' active' : '')}
+              onClick={onToggleBtw}
+              title="切换 /btw 只读旁路问答（不调工具、不写入主对话，主任务运行中也可随时问）"
+            >
+              /btw
+            </button>
+          )}
           <div className="composer-actions">
             <ContextMeter key={`${contextSessionId}/${contextTurn?.id ?? ''}`} sessionId={contextSessionId}
               turn={contextTurn} messages={contextMessages} live={contextReading}
@@ -364,7 +437,11 @@ export default function Composer({
             {busy ? (
               <>
                 {canSend && (
-                  <button className="send-btn enqueue" onClick={() => onSend(input)} title="加入待发送队列 (Enter)">
+                  <button
+                    className={'send-btn' + (isBtwSend ? '' : ' enqueue')}
+                    onClick={() => onSend(input)}
+                    title={isBtwSend ? '立即发起 /btw 只读提问 (Enter)' : '加入待发送队列 (Enter)'}
+                  >
                     <ArrowUp size={15} />
                   </button>
                 )}

@@ -3,7 +3,7 @@
 import { DatabaseSync } from 'node:sqlite';
 import path from 'node:path';
 import { copyFileSync, existsSync, mkdirSync } from 'node:fs';
-import { messageText, normalizeMessage, type ContextReading, type Session, type ScheduledTask, type SessionSummary, type TaskRun, type ViewMessage } from '@paw/shared';
+import { messageText, normalizeMessage, type ContextCategory, type ContextReading, type Session, type SessionPermission, type ScheduledTask, type SessionSearchResult, type SessionSummary, type TaskRun, type TurnTrace, type ViewMessage } from '@paw/shared';
 import { friendlyGatewayError } from './gateway/client.js';
 import { DATA_DIR, LEGACY_DIRS, dataFile } from './paths.js';
 
@@ -31,6 +31,19 @@ db.exec(`
   CREATE TRIGGER IF NOT EXISTS trim_context_samples AFTER INSERT ON context_samples BEGIN
     DELETE FROM context_samples WHERE seq IN (
       SELECT seq FROM context_samples WHERE session_id=NEW.session_id ORDER BY at DESC, seq DESC LIMIT -1 OFFSET 100
+    );
+  END;
+  CREATE TABLE IF NOT EXISTS turn_traces (
+    session_id TEXT NOT NULL,
+    turn_id TEXT NOT NULL,
+    at INTEGER NOT NULL,
+    data TEXT NOT NULL,
+    PRIMARY KEY (session_id, turn_id)
+  );
+  CREATE INDEX IF NOT EXISTS idx_turn_traces ON turn_traces(session_id, at DESC);
+  CREATE TRIGGER IF NOT EXISTS trim_turn_traces AFTER INSERT ON turn_traces BEGIN
+    DELETE FROM turn_traces WHERE session_id=NEW.session_id AND turn_id IN (
+      SELECT turn_id FROM turn_traces WHERE session_id=NEW.session_id ORDER BY at DESC LIMIT -1 OFFSET 100
     );
   END;
 `);
@@ -78,8 +91,8 @@ function migrateLegacyError(m: ViewMessage): ViewMessage {
   return { ...m, content, error: friendlyGatewayError(502, match[1].replace(/^gateway (\d+): /, '')) };
 }
 
-/** 会话归属元数据（workspace/source/taskId/runId/handoffFrom/handoffTo），单独存 JSON 方便扩展 */
-type SessionMeta = Pick<Session, 'workspace' | 'source' | 'taskId' | 'runId' | 'parentId' | 'handoffFrom' | 'handoffTo'>;
+/** 会话归属元数据（workspace/source/taskId/runId/handoffFrom/handoffTo/permission），单独存 JSON 方便扩展 */
+type SessionMeta = Pick<Session, 'workspace' | 'source' | 'taskId' | 'runId' | 'parentId' | 'handoffFrom' | 'handoffTo' | 'permission'>;
 interface SessionRow {
   id: string;
   title: string;
@@ -95,11 +108,24 @@ function parseHandoffLink(raw: unknown): Session['handoffFrom'] {
   return { sessionId: r.sessionId, title: typeof r.title === 'string' && r.title ? r.title : '原会话' };
 }
 
+export function parseSessionPermission(raw: unknown): SessionPermission | undefined {
+  if (!raw || typeof raw !== 'object') return undefined;
+  const r = raw as { mode?: unknown; allow?: unknown; deny?: unknown };
+  if (r.mode !== 'default' && r.mode !== 'strict') return undefined;
+  const clean = (arr: unknown) =>
+    Array.isArray(arr) ? [...new Set(arr.filter((x): x is string => typeof x === 'string' && !!x.trim()))] : [];
+  // run_command 禁止整工具级会话放行
+  const allow = clean(r.allow).filter((name) => name !== 'run_command');
+  const deny = clean(r.deny);
+  return { mode: r.mode, allow, deny };
+}
+
 function parseSessionMeta(raw: string | null): SessionMeta {
   try {
     const m = JSON.parse(raw || '{}') as SessionMeta;
     const handoffFrom = parseHandoffLink(m.handoffFrom);
     const handoffTo = parseHandoffLink(m.handoffTo);
+    const permission = parseSessionPermission(m.permission);
     return {
       ...(typeof m.workspace === 'string' && m.workspace ? { workspace: m.workspace } : {}),
       ...(m.source === 'task' || m.source === 'subagent' ? { source: m.source } : {}),
@@ -108,6 +134,7 @@ function parseSessionMeta(raw: string | null): SessionMeta {
       ...(typeof m.parentId === 'string' && m.parentId ? { parentId: m.parentId } : {}),
       ...(handoffFrom ? { handoffFrom } : {}),
       ...(handoffTo ? { handoffTo } : {}),
+      ...(permission ? { permission } : {}),
     };
   } catch { return {}; }
 }
@@ -157,7 +184,7 @@ function migrateSessionsOnce(): void {
     }
     if (!changed) continue;
     db.prepare('UPDATE sessions SET messages=?, meta=? WHERE id=?')
-      .run(JSON.stringify(msgs), JSON.stringify({ workspace, source, taskId, runId: meta.runId, parentId: meta.parentId }), r.id);
+      .run(JSON.stringify(msgs), serializeSessionMeta({ ...meta, workspace, source, taskId }), r.id);
   }
 }
 migrateSessionsOnce();
@@ -176,7 +203,53 @@ export function getSession(id: string): Session | null {
   } : null;
 }
 
-function serializeSessionMeta(s: Session): string {
+/** 历史消息正文检索：只扫普通会话的 user/assistant 文本块，忽略工具输出与 task/subagent 内部会话 */
+export function searchSessions(
+  query: string,
+  opts: { workspace?: string; limit?: number } = {},
+): SessionSearchResult[] {
+  const needle = query.trim().toLowerCase();
+  if (!needle) return [];
+  const limit = Math.min(50, Math.max(1, Math.floor(opts.limit ?? 50)));
+  const rows = db.prepare('SELECT id, title, messages, updated_at, meta FROM sessions ORDER BY updated_at DESC')
+    .all() as unknown as SessionRow[];
+  const results: SessionSearchResult[] = [];
+  for (const r of rows) {
+    const meta = parseSessionMeta(r.meta);
+    if (meta.source === 'task' || meta.source === 'subagent') continue;
+    if (opts.workspace && meta.workspace !== opts.workspace) continue;
+    let msgs: ViewMessage[];
+    try {
+      const parsed = JSON.parse(r.messages);
+      if (!Array.isArray(parsed)) continue;
+      msgs = parsed as ViewMessage[];
+    } catch { continue; }
+    for (let i = msgs.length - 1; i >= 0; i--) {
+      const m = msgs[i];
+      if (!m || (m.role !== 'user' && m.role !== 'assistant')) continue;
+      const flat = messageText(m).replace(/\s+/g, ' ').trim();
+      if (!flat) continue;
+      const idx = flat.toLowerCase().indexOf(needle);
+      if (idx < 0) continue;
+      const start = Math.max(0, idx - 60);
+      const end = Math.min(flat.length, idx + needle.length + 60);
+      const snippet = (start > 0 ? '…' : '') + flat.slice(start, end) + (end < flat.length ? '…' : '');
+      results.push({
+        sessionId: r.id,
+        title: r.title,
+        updatedAt: r.updated_at,
+        ...(meta.workspace ? { workspace: meta.workspace } : {}),
+        messageId: m.id,
+        role: m.role,
+        snippet,
+      });
+      if (results.length >= limit) return results;
+    }
+  }
+  return results;
+}
+
+function serializeSessionMeta(s: SessionMeta): string {
   return JSON.stringify({
     workspace: s.workspace,
     source: s.source,
@@ -185,7 +258,35 @@ function serializeSessionMeta(s: Session): string {
     parentId: s.parentId,
     handoffFrom: s.handoffFrom,
     handoffTo: s.handoffTo,
+    permission: s.permission ? parseSessionPermission(s.permission) : undefined,
   });
+}
+
+/** 仅更新单个会话的 permission 元数据，绝不碰 messages（避免侧栏未加载正文时误清空历史） */
+export function updateSessionPermission(id: string, permission: SessionPermission): SessionPermission | null {
+  const clean = parseSessionPermission(permission);
+  if (!clean) return null;
+  const row = db.prepare('SELECT meta FROM sessions WHERE id=?').get(id) as { meta: string | null } | undefined;
+  if (!row) return null;
+  const meta = parseSessionMeta(row.meta);
+  meta.permission = clean;
+  db.prepare('UPDATE sessions SET meta=? WHERE id=?').run(serializeSessionMeta(meta), id);
+  return clean;
+}
+
+export function upsertTurnTrace(sessionId: string, trace: TurnTrace): void {
+  db.prepare(`INSERT INTO turn_traces(session_id, turn_id, at, data) VALUES(?, ?, ?, ?)
+    ON CONFLICT(session_id, turn_id) DO UPDATE SET at=excluded.at, data=excluded.data`)
+    .run(sessionId, trace.turnId, trace.at, JSON.stringify(trace));
+}
+
+export function listTurnTraces(sessionId: string): TurnTrace[] {
+  const rows = db.prepare('SELECT data FROM turn_traces WHERE session_id=? ORDER BY at DESC').all(sessionId) as { data: string }[];
+  const out: TurnTrace[] = [];
+  for (const r of rows) {
+    try { out.push(JSON.parse(r.data) as TurnTrace); } catch { /* 跳过损坏记录 */ }
+  }
+  return out;
 }
 
 export function upsertSession(s: Session): void {
@@ -241,6 +342,18 @@ export function getContextSamples(id: string): object[] {
   return rows.map(row => ({ ...JSON.parse(String(row.data)), at: Number(row.at) }));
 }
 
+function parseContextCategory(raw: unknown): ContextCategory | undefined {
+  if (!raw || typeof raw !== 'object') return undefined;
+  const r = raw as Record<string, unknown>;
+  const keys = ['system', 'user', 'assistant', 'tool', 'tools', 'images'] as const;
+  const out = {} as ContextCategory;
+  for (const k of keys) {
+    if (!Number.isFinite(r[k])) return undefined;
+    out[k] = Number(r[k]);
+  }
+  return out;
+}
+
 export function getContextReading(id: string, turnId: string, since?: number): ContextReading | null {
   let row = db.prepare(`SELECT data FROM context_samples WHERE session_id=? AND json_extract(data,'$.turnId')=?
     ORDER BY at DESC, seq DESC LIMIT 1`).get(id, turnId);
@@ -256,21 +369,25 @@ export function getContextReading(id: string, turnId: string, since?: number): C
     }
   }
   if (!row) return null;
-  const { usage, estimatedTokens } = JSON.parse(String(row.data));
+  const { usage, estimatedTokens, byCategory: rawCat } = JSON.parse(String(row.data));
+  const byCategory = parseContextCategory(rawCat);
   if (Number.isFinite(usage?.prompt) && Number.isFinite(usage?.completion)) {
-    return { tokens: usage.prompt, estimated: false };
+    return { tokens: usage.prompt, estimated: false, ...(byCategory ? { byCategory } : {}) };
   }
-  return Number.isFinite(estimatedTokens) ? { tokens: estimatedTokens, estimated: true } : null;
+  return Number.isFinite(estimatedTokens)
+    ? { tokens: estimatedTokens, estimated: true, ...(byCategory ? { byCategory } : {}) }
+    : null;
 }
 
 function removeSessionData(id?: string): void {
   db.exec('BEGIN IMMEDIATE');
   try {
     if (id === undefined) {
-      db.exec('DELETE FROM context_checkpoints; DELETE FROM context_samples; DELETE FROM sessions');
+      db.exec('DELETE FROM context_checkpoints; DELETE FROM context_samples; DELETE FROM turn_traces; DELETE FROM sessions');
     } else {
       db.prepare('DELETE FROM context_checkpoints WHERE session_id=?').run(id);
       db.prepare('DELETE FROM context_samples WHERE session_id=?').run(id);
+      db.prepare('DELETE FROM turn_traces WHERE session_id=?').run(id);
       db.prepare('DELETE FROM sessions WHERE id=?').run(id);
     }
     db.exec('COMMIT');

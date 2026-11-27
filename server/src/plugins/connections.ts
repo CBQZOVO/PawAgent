@@ -8,7 +8,13 @@ export const connectionsPlugin: PawPlugin<ServerToolExecCtx> = {
     {
       schema: { name: 'call_api', description: 'Call configured external API connection', parameters: { type: 'object', properties: {} } },
       resolveSchema: () => callApiSchema(),
-      meta: { prunable: true },
+      meta: {
+        prunable: true,
+        mutating: (args) => {
+          const method = String(args.method || 'GET').toUpperCase();
+          return method !== 'GET' && method !== 'HEAD' && method !== 'OPTIONS';
+        },
+      },
       execute: (args, _id, ctx) => executeCallApi(args, ctx),
     },
   ],

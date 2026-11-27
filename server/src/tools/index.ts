@@ -64,6 +64,7 @@ export interface ToolContext {
   emit?: (ev: import('@paw/shared').AgentEvent) => void;
   parentMessages?: import('@paw/shared').ChatMessage[];
   outputSchema?: Record<string, unknown>;
+  authorize?: import('@paw/kernel').ToolRuntime['authorize'];
 }
 
 export async function executeTool(
@@ -90,6 +91,7 @@ export async function executeTool(
       parentSessionId: ctx.sessionId,
       emit: ctx.emit,
       parentMessages: ctx.parentMessages,
+      authorize: ctx.authorize,
     });
   }
   if (pawPlugins.hasTool(name)) {

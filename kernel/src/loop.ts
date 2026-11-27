@@ -169,7 +169,10 @@ export async function* runAgent(params: RunAgentParams): AsyncGenerator<AgentEve
       : await compactMessages(streamChat, messages, toolSchemas, budgetOptions);
     if (signal?.aborted) return;
     messages = plan.messages;
-    yield { type: 'context_usage', reading: { tokens: plan.insight.estimatedTokens, estimated: true } };
+    yield {
+      type: 'context_usage',
+      reading: { tokens: plan.insight.estimatedTokens, estimated: true, byCategory: plan.insight.byCategory },
+    };
 
     const wire = pinned && injectSystemPrompt && systemPrompt
       ? injectSystemPrompt(messages.slice(1), systemPrompt)
@@ -218,7 +221,10 @@ export async function* runAgent(params: RunAgentParams): AsyncGenerator<AgentEve
     if (usage) {
       usageTotal.prompt += usage.prompt;
       usageTotal.completion += usage.completion;
-      yield { type: 'context_usage', reading: { tokens: usage.prompt, estimated: false } };
+      yield {
+        type: 'context_usage',
+        reading: { tokens: usage.prompt, estimated: false, byCategory: plan.insight.byCategory },
+      };
     }
 
     if (signal?.aborted) return;
@@ -267,7 +273,7 @@ export async function* runAgent(params: RunAgentParams): AsyncGenerator<AgentEve
         });
         continue;
       }
-      yield { type: 'done', usage: usageTotal.prompt || usageTotal.completion ? usageTotal : undefined };
+      yield { type: 'done', usage: usageTotal.prompt || usageTotal.completion ? usageTotal : undefined, rounds: round + 1 };
       return;
     }
 
@@ -353,13 +359,34 @@ export async function* runAgent(params: RunAgentParams): AsyncGenerator<AgentEve
         const launch = async (p: typeof parsed[number]) => {
           const summary = summarize(p.call.name, p.args, typeof p.args.summary === 'string' ? p.args.summary : undefined);
           queue.push({ type: 'tool_start', id: p.call.id, name: p.call.name, summary, args: p.args });
-          const r = await tools.execute(p.call.name, p.args, p.call.id, {
+          const execCtx = {
             signal,
             depth,
             sessionId,
-            emit: (ev) => queue.push(ev),
+            unattended,
+            emit: (ev: AgentEvent) => queue.push(ev),
             parentMessages: p.args.fork === true ? wire : undefined,
-          }).catch((e: Error) => ({ tool_call_id: p.call.id, content: `Tool error: ${e.message}`, isError: true }));
+          };
+          let r: ToolResult;
+          if (tools.authorize) {
+            const auth = await tools.authorize(p.call.name, p.args, p.call.id, execCtx)
+              .catch((e: Error) => ({ decision: 'deny' as const, reason: e.message, rejectedByUser: true }));
+            if (auth.decision === 'deny') {
+              const reason = auth.reason ? `：${auth.reason}` : '';
+              r = {
+                tool_call_id: p.call.id,
+                content: `用户拒绝执行 ${p.call.name}${reason}`,
+                isError: true,
+                rejectedByUser: auth.rejectedByUser ?? true,
+              };
+            } else {
+              r = await tools.execute(p.call.name, p.args, p.call.id, execCtx)
+                .catch((e: Error) => ({ tool_call_id: p.call.id, content: `Tool error: ${e.message}`, isError: true }));
+            }
+          } else {
+            r = await tools.execute(p.call.name, p.args, p.call.id, execCtx)
+              .catch((e: Error) => ({ tool_call_id: p.call.id, content: `Tool error: ${e.message}`, isError: true }));
+          }
           results.set(p.call.id, r);
           queue.push({ type: 'tool_done', id: p.call.id, name: p.call.name, ok: !r.isError, output: r.content });
         };
@@ -396,14 +423,35 @@ export async function* runAgent(params: RunAgentParams): AsyncGenerator<AgentEve
       const workers = Array.from({ length: Math.min(maxParallelCalls, batch.length) }, async () => {
         while (cursor < batch.length && !signal?.aborted) {
           const p = batch[cursor++];
-          const r: ToolResult = await tools.execute(p.call.name, p.args, p.call.id, {
+          const execCtx = {
             signal,
             depth,
             allowedTools,
             sessionId,
+            unattended,
             outputSchema,
-            emit: (ev) => queue.push(ev),
-          }).catch((e: Error) => ({ tool_call_id: p.call.id, content: `Tool error: ${e.message}`, isError: true }));
+            emit: (ev: AgentEvent) => queue.push(ev),
+          };
+          let r: ToolResult;
+          if (tools.authorize) {
+            const auth = await tools.authorize(p.call.name, p.args, p.call.id, execCtx)
+              .catch((e: Error) => ({ decision: 'deny' as const, reason: e.message, rejectedByUser: true }));
+            if (auth.decision === 'deny') {
+              const reason = auth.reason ? `：${auth.reason}` : '';
+              r = {
+                tool_call_id: p.call.id,
+                content: `用户拒绝执行 ${p.call.name}${reason}`,
+                isError: true,
+                rejectedByUser: auth.rejectedByUser ?? true,
+              };
+            } else {
+              r = await tools.execute(p.call.name, p.args, p.call.id, execCtx)
+                .catch((e: Error) => ({ tool_call_id: p.call.id, content: `Tool error: ${e.message}`, isError: true }));
+            }
+          } else {
+            r = await tools.execute(p.call.name, p.args, p.call.id, execCtx)
+              .catch((e: Error) => ({ tool_call_id: p.call.id, content: `Tool error: ${e.message}`, isError: true }));
+          }
           results.set(p.call.id, r);
           queue.push({ type: 'tool_done', id: p.call.id, name: p.call.name, ok: !r.isError, output: r.content });
         }
@@ -435,14 +483,18 @@ export async function* runAgent(params: RunAgentParams): AsyncGenerator<AgentEve
     const validStructured = parsed.some((p) => p.call.name === 'structured_output' && !p.bad && !results.get(p.call.id)?.isError);
     const anyFailedInRound = parsed.some((p) => results.get(p.call.id)?.isError);
     if (validStructured && !anyFailedInRound) {
-      yield { type: 'done', usage: usageTotal.prompt || usageTotal.completion ? usageTotal : undefined };
+      yield { type: 'done', usage: usageTotal.prompt || usageTotal.completion ? usageTotal : undefined, rounds: round + 1 };
       return;
     }
 
     const reminders: string[] = [];
     if (roundReminder) reminders.push(roundReminder);
     const failedNames = [...new Set(parsed
-      .filter((p) => (canAskUser ? p.call.name !== 'ask_user' : true) && results.get(p.call.id)?.isError)
+      .filter((p) => {
+        if (canAskUser && p.call.name === 'ask_user') return false;
+        const r = results.get(p.call.id);
+        return !!r?.isError && !r.rejectedByUser;
+      })
       .map((p) => p.call.name))];
     if (failedNames.length) {
       errorRounds++;

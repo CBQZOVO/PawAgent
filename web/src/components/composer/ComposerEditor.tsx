@@ -40,6 +40,7 @@ function initialState(props: ComposerEditorProps) {
 const SLASH_COMMANDS = [
   { cmd: '/compact', insert: '/compact', desc: '压缩当前会话上下文' },
   { cmd: '/handoff', insert: '/handoff ', desc: '提炼交接单并开启新会话（可附下一步目标）' },
+  { cmd: '/btw', insert: '/btw ', desc: '只读旁路提问（不调工具、不入主会话）' },
 ] as const;
 
 export default function ComposerEditor(props: ComposerEditorProps) {

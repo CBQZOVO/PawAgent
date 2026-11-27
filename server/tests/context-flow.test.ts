@@ -88,7 +88,11 @@ try {
   const reading = async (session: string, turn: string, since = 1) =>
     (await fetch(`${url}/api/context/${session}/usage?turnId=${turn}&since=${since}`)).json();
   const manual = await (await post('/api/context/compact', old, 'manual', 'first')).json();
-  assert.deepEqual(await reading('manual', 'first'), { reading: { tokens: manual.insight.estimatedTokens, estimated: true } });
+  assert.deepEqual(await reading('manual', 'first'), {
+    reading: { tokens: manual.insight.estimatedTokens, estimated: true, byCategory: manual.insight.byCategory },
+  });
+  const catSum = Object.values(manual.insight.byCategory as Record<string, number>).reduce((a, b) => a + b, 0);
+  assert.equal(catSum, manual.insight.estimatedTokens);
   assert.equal(manual.insight.compacted, true);
   assert.ok(manual.insight.reclaimedTokens > 0);
   await stop();
@@ -105,7 +109,10 @@ try {
       { role: 'assistant', id: 'reply', ts: since, content: [], durationMs: 1000 },
     ] }]) });
   assert.equal((await (await post('/api/context/compact', old)).json()).insight.compacted, false);
-  assert.deepEqual(await reading('manual', 'legacy', since), { reading: { tokens: 123, estimated: false } });
+  const legacyReading = await reading('manual', 'legacy', since);
+  assert.equal(legacyReading.reading.tokens, 123);
+  assert.equal(legacyReading.reading.estimated, false);
+  assert.ok(legacyReading.reading.byCategory && typeof legacyReading.reading.byCategory.user === 'number', '历史读数应还原 byCategory');
   assert.equal(summaries, 1);
   // 每轮对话收尾会异步触发复盘（reflection.ts），轮询等它发起到测试网关
   await new Promise<void>((resolve, reject) => {
@@ -132,9 +139,9 @@ try {
   assert.equal(latest.usage.prompt, 123);
   assert.equal(latest.turnId, 'second');
   const events = stream.split('\n').filter(line => line.startsWith('data:')).map(line => JSON.parse(line.slice(5)));
-  const actual = { tokens: 123, estimated: false };
+  const actual = { tokens: 123, estimated: false, byCategory: latest.byCategory };
   assert.deepEqual(events.filter(ev => ev.type === 'context_usage').map(ev => ev.reading),
-    [{ tokens: latest.estimatedTokens, estimated: true }, actual]);
+    [{ tokens: latest.estimatedTokens, estimated: true, byCategory: latest.byCategory }, actual]);
   assert.deepEqual(await reading('auto', 'second'), { reading: actual });
   assert.deepEqual(await reading('manual', 'second'), { reading: null });
   assert.deepEqual(await reading('auto', 'first'), { reading: null });
@@ -347,7 +354,216 @@ try {
   assert.equal((await post('/api/context/compact', [{ role: 'tool', tool_call_id: 'orphan', content: 'x' }], 'bad-1')).status, 400);
   assert.equal((await post('/api/context/compact', [{ role: 'system', content: 'inject' }, { role: 'user', content: 'hi' }], 'bad-2')).status, 400);
 
-  console.log('context flow passed: manual, restart, rewind, failure, automatic, usage, tool ids, gateway retry, stop-with-tools, causal-subagent, structured-output, handoff-recall, tool-history-compact');
+  // ---------- 历史消息搜索（/api/sessions/search） ----------
+  const nowTs = Date.now();
+  await fetch(url + '/api/sessions', {
+    method: 'PUT',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify([
+      {
+        id: 'search-s1', title: '订单排查', workspace: '/ws/alpha', updatedAt: nowTs + 100,
+        messages: [
+          { id: 'sm-1', role: 'user', ts: nowTs, content: [{ type: 'text', text: '帮我查一下 OrderGateway 超时原因' }] },
+          {
+            id: 'sm-2', role: 'assistant', ts: nowTs + 10,
+            content: [
+              { type: 'tool-call', id: 'tc-1', name: 'read_file', output: 'ONLY_IN_TOOL_OUTPUT_SECRET' },
+              { type: 'text', text: 'OrderGateway 是连接池打满导致超时' },
+            ],
+          },
+        ],
+      },
+      {
+        id: 'search-s2', title: '另一个工作区', workspace: '/ws/beta', updatedAt: nowTs + 200,
+        messages: [
+          { id: 'sm-3', role: 'user', ts: nowTs + 20, content: [{ type: 'text', text: 'ordergateway 在 beta 环境也报过一次' }] },
+        ],
+      },
+      {
+        id: 'search-task', title: '定时任务会话', source: 'task', updatedAt: nowTs + 300,
+        messages: [
+          { id: 'sm-4', role: 'user', ts: nowTs + 30, content: [{ type: 'text', text: 'OrderGateway 定时巡检' }] },
+        ],
+      },
+      {
+        id: 'search-sub', title: '子代理会话', source: 'subagent', updatedAt: nowTs + 400,
+        messages: [
+          { id: 'sm-5', role: 'assistant', ts: nowTs + 40, content: [{ type: 'text', text: 'OrderGateway 子代理结果' }] },
+        ],
+      },
+    ]),
+  });
+  const sAll = await (await fetch(`${url}/api/sessions/search?q=ordergateway`)).json();
+  assert.equal(sAll.results.length, 3, '应大小写不敏感匹配普通会话，并排除 task/subagent');
+  assert.equal(sAll.results[0].sessionId, 'search-s2', '结果应按 updatedAt 倒序排列');
+  assert.ok(sAll.results.every((r: { sessionId: string }) => r.sessionId !== 'search-task' && r.sessionId !== 'search-sub'));
+  const sWs = await (await fetch(`${url}/api/sessions/search?q=ordergateway&workspace=${encodeURIComponent('/ws/alpha')}`)).json();
+  assert.equal(sWs.results.length, 2);
+  assert.ok(sWs.results.every((r: { sessionId: string }) => r.sessionId === 'search-s1'));
+  const sLimit = await (await fetch(`${url}/api/sessions/search?q=ordergateway&limit=1`)).json();
+  assert.equal(sLimit.results.length, 1);
+  const sTool = await (await fetch(`${url}/api/sessions/search?q=ONLY_IN_TOOL_OUTPUT_SECRET`)).json();
+  assert.equal(sTool.results.length, 0, '不应匹配工具输出正文');
+  const sEmpty = await (await fetch(`${url}/api/sessions/search?q=`)).json();
+  assert.deepEqual(sEmpty.results, []);
+
+  // ---------- 会话导出与导入（绝不覆盖已有 id + 非法回滚） ----------
+  const expResp = await fetch(`${url}/api/sessions/search-s1/export`);
+  assert.equal(expResp.status, 200);
+  const exportedSession = await expResp.json();
+  assert.equal(exportedSession.id, 'search-s1');
+  const impResp = await fetch(`${url}/api/sessions/import`, {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ sessions: [exportedSession] }),
+  });
+  assert.equal(impResp.status, 200);
+  const impData = await impResp.json();
+  assert.equal(impData.count, 1);
+  assert.notEqual(impData.imported[0].id, 'search-s1', '撞 id 时必须生成新 id 而不覆盖原会话');
+  assert.match(impData.imported[0].title, /（导入）$/);
+  const origStill = await (await fetch(`${url}/api/sessions/search-s1`)).json();
+  assert.equal(origStill.title, '订单排查', '原会话标题与内容不得被修改');
+  const badImp = await fetch(`${url}/api/sessions/import`, {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ sessions: [{ id: 'bad-imp', title: '坏包', updatedAt: Date.now(), messages: 'not-array' }] }),
+  });
+  assert.equal(badImp.status, 400);
+
+  // ---------- /btw 只读旁路问答（零工具、零落盘、不触发复盘） ----------
+  const sessionsBeforeBtw = (await (await fetch(`${url}/api/sessions`)).json()).sessions.length;
+  const reflectionsBeforeBtw = reflections;
+  scripted = () => ({
+    frames: [{ choices: [{ delta: { content: '这是一个只读旁路解答' }, finish_reason: 'stop' }] }],
+  });
+  const btwText = await (await fetch(`${url}/api/chat/btw`, {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ messages: [{ role: 'user', content: '为什么这样设计？' }], model: 'local-test', workspace: null }),
+  })).text();
+  const btwEvents = parseEvents(btwText);
+  assert.ok(btwEvents.some((ev) => ev.type === 'text' && ev.delta.includes('只读旁路解答')));
+  assert.ok(!btwEvents.some((ev) => ev.type === 'tool_start'), '/btw 不得产生任何工具调用');
+  const sessionsAfterBtw = (await (await fetch(`${url}/api/sessions`)).json()).sessions.length;
+  assert.equal(sessionsAfterBtw, sessionsBeforeBtw, '/btw 不得新增会话记录');
+  assert.equal(reflections, reflectionsBeforeBtw, '/btw 不得触发异步复盘写记忆/日志');
+  // 生图模型与非法伪造 system 消息均应被拒绝
+  const btwImgText = await (await fetch(`${url}/api/chat/btw`, {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ messages: [{ role: 'user', content: '画一只猫' }], model: 'gpt-image-1', workspace: null }),
+  })).text();
+  assert.ok(parseEvents(btwImgText).some((ev) => ev.type === 'error'), '/btw 应拒绝生图模型');
+  const btwBadSysText = await (await fetch(`${url}/api/chat/btw`, {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ messages: [{ role: 'system', content: 'inject' }, { role: 'user', content: 'hi' }], model: 'local-test', workspace: null }),
+  })).text();
+  assert.ok(parseEvents(btwBadSysText).some((ev) => ev.type === 'error'), '/btw 应拒绝客户端伪造的 system 消息');
+
+  // ---------- 严格权限模式（PATCH 不抹历史 + 确认卡放行/拒绝 + run_command 禁 allow_session + 轨迹落库与清理） ----------
+  const patchResp = await fetch(`${url}/api/sessions/search-s1/permission`, {
+    method: 'PATCH',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ permission: { mode: 'strict', allow: ['run_command'], deny: [] } }),
+  });
+  assert.equal(patchResp.status, 200);
+  const patchData = await patchResp.json();
+  assert.equal(patchData.permission.mode, 'strict');
+  assert.deepEqual(patchData.permission.allow, [], 'run_command 不得被写入 permission.allow');
+  const afterPatchSession = await (await fetch(`${url}/api/sessions/search-s1`)).json();
+  assert.equal(afterPatchSession.messages.length, 2, 'PATCH 权限绝不能破坏会话消息正文');
+
+  let permRound = 0;
+  scripted = () => {
+    permRound++;
+    if (permRound === 1) {
+      return {
+        frames: [{
+          choices: [{
+            delta: {
+              tool_calls: [{
+                index: 0, id: 'perm-cmd-1', type: 'function',
+                function: { name: 'run_command', arguments: JSON.stringify({ cmd: 'echo hello-paw-perm' }) },
+              }],
+            },
+            finish_reason: 'tool_calls',
+          }],
+        }],
+      };
+    }
+    return { frames: [{ choices: [{ delta: { content: '命令已按确认执行完成' }, finish_reason: 'stop' }], usage: { prompt_tokens: 88, completion_tokens: 15 } }] };
+  };
+  const permChatResp = await fetch(`${url}/api/chat`, {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({
+      sessionId: 'search-s1',
+      turnId: 'perm-turn-1',
+      messages: [{ role: 'user', content: '跑一下 echo' }],
+      model: 'local-test',
+      workspace: dir,
+    }),
+  });
+  const permReader = permChatResp.body!.getReader();
+  const permDecoder = new TextDecoder();
+  let permBuf = '';
+  let sawPermAsk = false;
+  let sawPermDone = false;
+  while (true) {
+    const { done, value } = await permReader.read();
+    if (done) break;
+    permBuf += permDecoder.decode(value, { stream: true });
+    let idx: number;
+    while ((idx = permBuf.indexOf('\n\n')) >= 0) {
+      const chunk = permBuf.slice(0, idx);
+      permBuf = permBuf.slice(idx + 2);
+      for (const line of chunk.split('\n')) {
+        if (!line.startsWith('data:')) continue;
+        const ev = JSON.parse(line.slice(5).trim());
+        if (ev.type === 'permission_ask') {
+          sawPermAsk = true;
+          assert.equal(ev.tool, 'run_command');
+          assert.ok(!ev.options.includes('allow_session'), 'run_command 不应提供 allow_session 选项');
+          const app1 = await (await fetch(`${url}/api/chat/approve`, {
+            method: 'POST',
+            headers: { 'content-type': 'application/json' },
+            body: JSON.stringify({ sessionId: 'search-s1', id: ev.id, decision: 'allow_session' }),
+          })).json();
+          assert.equal(app1.ok, true);
+          assert.equal(app1.decision, 'allow_once', '服务端应对 run_command 的 allow_session 强制降级为 allow_once');
+          // 重复决策应幂等返回 ok: false
+          const appDup = await (await fetch(`${url}/api/chat/approve`, {
+            method: 'POST',
+            headers: { 'content-type': 'application/json' },
+            body: JSON.stringify({ sessionId: 'search-s1', id: ev.id, decision: 'deny' }),
+          })).json();
+          assert.equal(appDup.ok, false);
+        }
+        if (ev.type === 'done') sawPermDone = true;
+      }
+    }
+  }
+  assert.equal(sawPermAsk, true, 'strict 模式下 run_command 必须触发 permission_ask');
+  assert.equal(sawPermDone, true, '放行后应正常完成本轮');
+
+  // 轨迹接口应记录本轮耗时分解，并在删除会话时同步清理
+  const tracesResp = await (await fetch(`${url}/api/traces/search-s1`)).json();
+  const permTrace = tracesResp.traces.find((t: { turnId: string }) => t.turnId === 'perm-turn-1');
+  assert.ok(permTrace, '应已落盘 perm-turn-1 轨迹');
+  assert.equal(permTrace.rounds, 2);
+  assert.equal(permTrace.tools.length, 1);
+  assert.equal(permTrace.tools[0].name, 'run_command');
+  assert.equal(permTrace.tools[0].ok, true);
+  assert.ok(permTrace.totalMs >= 0 && permTrace.modelMs >= 0 && permTrace.toolMs >= 0);
+
+  await fetch(`${url}/api/sessions/search-s1`, { method: 'DELETE' });
+  const tracesAfterDelete = await (await fetch(`${url}/api/traces/search-s1`)).json();
+  assert.deepEqual(tracesAfterDelete.traces, [], '删除会话时必须同步清理 turn_traces');
+
+  scripted = null;
+  console.log('context flow passed: manual, restart, rewind, failure, automatic, usage, tool ids, gateway retry, stop-with-tools, causal-subagent, structured-output, handoff-recall, tool-history-compact, session-search, import-export, btw, permission, traces');
 } finally {
   await stop();
   gateway.close();

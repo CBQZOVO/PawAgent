@@ -2,12 +2,12 @@ import { useEffect, useMemo, useRef, useState, type MouseEvent as ReactMouseEven
 import { createPortal } from 'react-dom';
 import {
   ArrowRightLeft, BarChart3, Box, Brain, Briefcase, ChevronDown, Clock, Compass,
-  FileText, Folder, Globe, GripVertical, LayoutGrid, Link2, MessageSquare,
+  Download, FileText, Folder, Globe, GripVertical, LayoutGrid, Link2, MessageSquare,
   MessageSquarePlus, MoreHorizontal, PanelLeftClose, PanelLeftOpen, Plug, Plus,
-  Sparkles, Trash2,
+  Search, Shield, Sparkles, Trash2, Upload, X,
 } from 'lucide-react';
-import type { Session } from '@paw/shared';
-import { getWorkspace, setWorkspace, WORKSPACE_CHANGED, type PluginPageInfo, type SearchProvider, type WorkspaceInfo } from '../api/client';
+import type { Session, SessionSearchResult } from '@paw/shared';
+import { getWorkspace, searchSessionsApi, setWorkspace, WORKSPACE_CHANGED, type PluginPageInfo, type SearchProvider, type WorkspaceInfo } from '../api/client';
 import ProviderMenu from './ProviderMenu';
 import WorkspacePicker from './WorkspacePicker';
 import Tips from './Tips';
@@ -49,7 +49,8 @@ function renderPluginIcon(icon?: string): ReactNode {
 /** 左侧栏：品牌 + 新会话 + 可定制菜单 + 会话列表 + 搜索引擎切换 */
 export default function Sidebar({
   sessions, activeId, provider, hasKey, providerMenu,
-  onNew, onSelect, onDelete, onHandoffSession, onProviderToggle, onProviderClose, onProviderSwitch, onTasks, onMemory, onRemoveWorkspace, onNewInWorkspace, page, onPage,
+  onNew, onSelect, onDelete, onHandoffSession, onExportSession, onImportSessions, onToggleStrict,
+  onProviderToggle, onProviderClose, onProviderSwitch, onTasks, onMemory, onRemoveWorkspace, onNewInWorkspace, page, onPage,
   collapsed, onToggleCollapse, ideMode, runningIds, toolsTab,
   pluginPages = [], activePluginPageKey = null, onOpenPluginPage,
 }: {
@@ -61,9 +62,12 @@ export default function Sidebar({
   providerMenu: boolean;
   onNew: () => void;
   onNewInWorkspace: (root: string) => void;
-  onSelect: (id: string) => void;
+  onSelect: (id: string, messageId?: string) => void;
   onDelete: (id: string) => void;
   onHandoffSession?: (id: string) => void;
+  onExportSession?: (id: string) => void;
+  onImportSessions?: (file: File) => void;
+  onToggleStrict?: (id: string) => void;
   onRemoveWorkspace: (root: string) => void;
   onProviderToggle: () => void;
   onProviderClose: () => void;
@@ -85,14 +89,18 @@ export default function Sidebar({
   const [dragOverKey, setDragOverKey] = useState<string | null>(null);
   const [wsOpen, setWsOpen] = useState<Record<string, boolean>>({});
   const [wsInfo, setWsInfo] = useState<WorkspaceInfo | null>(null);
+  const [searchQuery, setSearchQuery] = useState('');
+  const [searchHits, setSearchHits] = useState<SessionSearchResult[]>([]);
+  const [searching, setSearching] = useState(false);
   const [menu, setMenu] = useState<{ key: string; left: number; top: number } | null>(null);
   const menuRef = useRef<HTMLDivElement>(null);
+  const importInputRef = useRef<HTMLInputElement>(null);
   const closeMenu = () => setMenu(null);
   const openMenu = (key: string) => (e: ReactMouseEvent<HTMLButtonElement>) => {
     e.stopPropagation();
     if (menu?.key === key) { setMenu(null); return; }
     const r = e.currentTarget.getBoundingClientRect();
-    const menuH = key.startsWith('session:') && onHandoffSession ? 96 : 56;
+    const menuH = key.startsWith('session:') ? 168 : 56;
     const openUp = r.bottom + 4 + menuH > window.innerHeight - 8;
     setMenu({
       key,
@@ -148,6 +156,23 @@ export default function Sidebar({
     if (!root) return;
     setWsOpen((p) => (p[root] ? p : { ...p, [root]: true }));
   }, [wsInfo?.root]);
+
+  const trimmedQuery = searchQuery.trim();
+  useEffect(() => {
+    if (!trimmedQuery) {
+      setSearchHits([]);
+      setSearching(false);
+      return;
+    }
+    const ctrl = new AbortController();
+    setSearching(true);
+    const timer = setTimeout(() => {
+      searchSessionsApi(trimmedQuery, { limit: 50, signal: ctrl.signal })
+        .then((res) => { if (!ctrl.signal.aborted) { setSearchHits(res); setSearching(false); } })
+        .catch(() => { if (!ctrl.signal.aborted) { setSearchHits([]); setSearching(false); } });
+    }, 200);
+    return () => { clearTimeout(timer); ctrl.abort(); };
+  }, [trimmedQuery]);
 
   const navItems = useMemo(() => {
     const all: Array<{
@@ -241,6 +266,25 @@ export default function Sidebar({
   };
 
   const chatSessions = sessions.filter((s) => s.source !== 'task' && s.source !== 'subagent');
+  const titleHits = useMemo(() => {
+    if (!trimmedQuery) return [];
+    const q = trimmedQuery.toLowerCase();
+    return chatSessions.filter((s) => s.title.toLowerCase().includes(q));
+  }, [chatSessions, trimmedQuery]);
+  const renderHighlighted = (text: string) => {
+    if (!trimmedQuery) return text;
+    const lower = text.toLowerCase();
+    const q = trimmedQuery.toLowerCase();
+    const idx = lower.indexOf(q);
+    if (idx < 0) return text;
+    return (
+      <>
+        {text.slice(0, idx)}
+        <mark className="side-search-mark">{text.slice(idx, idx + trimmedQuery.length)}</mark>
+        {text.slice(idx + trimmedQuery.length)}
+      </>
+    );
+  };
   const byWorkspace: Record<string, Session[]> = {};
   const recentSessions: Session[] = [];
   for (const s of chatSessions) {
@@ -255,6 +299,7 @@ export default function Sidebar({
   const wsShort = (p: string) => p.split(/[\\/]/).filter(Boolean).slice(-1)[0] || p;
   const renderSession = (s: Session, nested = false) => {
     const busy = runningIds.has(s.id);
+    const strict = s.permission?.mode === 'strict';
     const key = `session:${s.id}`;
     return (
       <div
@@ -264,6 +309,11 @@ export default function Sidebar({
       >
         {!nested && <MessageSquare size={14} className="session-icon" />}
         <span className="session-title">{s.title}</span>
+        {strict && (
+          <span className="session-strict-badge" title="已开启严格确认模式">
+            <Shield size={11} />
+          </span>
+        )}
         {busy ? (
           <span className="session-spin" title="正在生成" aria-label="正在生成" />
         ) : (
@@ -274,6 +324,12 @@ export default function Sidebar({
           </span>
         )}
         {renderMenu(key, <>
+          {onToggleStrict && menuItem(
+            strict ? '关闭严格确认模式' : '开启严格确认模式',
+            <Shield size={15} />,
+            () => onToggleStrict(s.id),
+          )}
+          {onExportSession && menuItem('导出会话 JSON', <Download size={15} />, () => onExportSession(s.id))}
           {onHandoffSession && menuItem('交接到新会话', <ArrowRightLeft size={15} />, () => onHandoffSession(s.id))}
           {menuItem('删除会话', <Trash2 size={15} />, () => onDelete(s.id), true)}
         </>)}
@@ -301,11 +357,90 @@ export default function Sidebar({
             {collapsed ? <PanelLeftOpen size={16} strokeWidth={2.1} /> : <PanelLeftClose size={16} strokeWidth={2.1} />}
           </button>
         </div>
-        <button className="new-btn" onClick={onNew}>
-          <Plus size={15} /> 新会话
-        </button>
+        <div className="side-new-row">
+          <button className="new-btn" onClick={onNew}>
+            <Plus size={15} /> 新会话
+          </button>
+          {onImportSessions && (
+            <>
+              <input
+                ref={importInputRef}
+                type="file"
+                accept=".json,application/json"
+                hidden
+                onChange={(e) => {
+                  const file = e.target.files?.[0];
+                  e.target.value = '';
+                  if (file) onImportSessions(file);
+                }}
+              />
+              <Tips label="导入会话 JSON（工具输出可能含敏感信息，请确认后再分享）">
+                <button
+                  type="button"
+                  className="side-import-btn"
+                  aria-label="导入会话"
+                  onClick={() => importInputRef.current?.click()}
+                >
+                  <Upload size={15} />
+                </button>
+              </Tips>
+            </>
+          )}
+        </div>
+        <div className="side-search">
+          <Search size={13} className="side-search-icon" />
+          <input
+            type="text"
+            value={searchQuery}
+            onChange={(e) => setSearchQuery(e.target.value)}
+            onKeyDown={(e) => { if (e.key === 'Escape' && searchQuery) setSearchQuery(''); }}
+            placeholder="搜索会话与消息…"
+            aria-label="搜索会话与历史消息"
+          />
+          {searchQuery && (
+            <button type="button" className="side-search-clear" aria-label="清空搜索" onClick={() => setSearchQuery('')}>
+              <X size={12} />
+            </button>
+          )}
+        </div>
       </div>
       <div className="side-scroll-area">
+        {trimmedQuery ? (
+          <div className="side-search-results">
+            {titleHits.length > 0 && (
+              <>
+                <div className="side-label">会话标题 ({titleHits.length})</div>
+                <div className="session-list">
+                  {titleHits.map((s) => renderSession(s))}
+                </div>
+              </>
+            )}
+            <div className="side-label">
+              历史消息 {searching ? '· 搜索中…' : `(${searchHits.length})`}
+            </div>
+            {searchHits.length > 0 ? (
+              <div className="session-list">
+                {searchHits.map((hit) => (
+                  <button
+                    key={`${hit.sessionId}:${hit.messageId}`}
+                    type="button"
+                    className={'side-search-hit' + (hit.sessionId === activeId ? ' active' : '')}
+                    onClick={() => onSelect(hit.sessionId, hit.messageId)}
+                  >
+                    <div className="side-search-hit-head">
+                      <span className="side-search-hit-title">{hit.title}</span>
+                      <span className="side-search-hit-role">{hit.role === 'user' ? '你' : '助手'}</span>
+                    </div>
+                    <div className="side-search-hit-snippet">{renderHighlighted(hit.snippet)}</div>
+                  </button>
+                ))}
+              </div>
+            ) : !searching ? (
+              <div className="side-empty">{titleHits.length ? '无更多正文匹配' : '没有找到匹配的会话或消息'}</div>
+            ) : null}
+          </div>
+        ) : (
+          <>
         <div className="side-label">工具与自动化</div>
         {navItems.map((item) => (
           <button
@@ -383,6 +518,8 @@ export default function Sidebar({
           {recentSessions.length === 0 && <div className="side-empty">还没有对话</div>}
           {recentSessions.map((s) => renderSession(s))}
         </div>
+          </>
+        )}
       </div>
       <ProviderMenu
         provider={provider} hasKey={hasKey} open={providerMenu}

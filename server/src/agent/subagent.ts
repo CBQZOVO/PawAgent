@@ -24,6 +24,7 @@ export interface SubagentContext {
   parentSessionId?: string;
   emit?: (ev: AgentEvent) => void;
   parentMessages?: ChatMessage[];
+  authorize?: import('@paw/kernel').ToolRuntime['authorize'];
 }
 
 export async function runSubagentTool(
@@ -41,7 +42,7 @@ export async function runSubagentTool(
         streamChat: (s) => streamChat(subCfg, s.messages, s.tools, s.images, s.signal),
       };
     },
-    tools: createPawToolRuntime(ctx.cfg, { workspace: ctx.workspace }),
+    tools: createPawToolRuntime(ctx.cfg, { workspace: ctx.workspace, authorize: ctx.authorize }),
     workspacePrompt: wsBlock || undefined,
     store: dbCheckpointStore,
     parentSignal: ctx.parentSignal,
