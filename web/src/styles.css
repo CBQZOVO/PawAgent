@@ -130,6 +130,15 @@ button { font-family: inherit; cursor: pointer; }
    文字的缩进改由行内 padding 提供，所以左右留白不变。 */
 .session-list { flex: 1; overflow-y: auto; padding: 0; }
 .side-empty { padding: 10px 17px; font-size: 14px; color: var(--text-placeholder); }
+/* 「最近任务」折叠：默认只显示最近几条，「查看更多」展开全部 */
+.side-recent-more {
+  display: flex; align-items: center; gap: 4px; width: 100%;
+  padding: 8px 10px 8px 17px; border: 0; background: none;
+  font: inherit; font-size: 14px; color: var(--text-secondary);
+  cursor: pointer; text-align: left;
+}
+.side-recent-more:hover { background: var(--soft); color: var(--ink); }
+.side-recent-more svg { opacity: .6; }
 .session-item {
   display: flex; align-items: center; gap: 7px; padding: 8px 10px 8px 17px;
   font-size: 14.5px; color: var(--text-regular); cursor: pointer;
@@ -1199,6 +1208,11 @@ button { font-family: inherit; cursor: pointer; }
 .ws-pick-local:disabled { opacity: .6; cursor: default; }
 
 /* Qoder 式侧栏分组 */
+/* side-body 必须是受约束的纵向 flex 容器：否则 side-scroll-area 拿不到高度上限，
+   overflow-y: auto 失效，会话多时整栏被撑开、底部内容被裁掉无法滚动 */
+.side-body { flex: 1; min-height: 0; display: flex; flex-direction: column; }
+/* 「工具与自动化」固定在滚动区上方，不参与滚动 */
+.side-fixed-nav { flex: none; }
 .side-scroll-area { flex: 1; overflow-y: auto; min-height: 0; }
 .side-automation { display: flex; align-items: center; gap: 8px; width: 100%; border: 0; background: none; color: var(--text-regular); padding: 7px 12px; font: inherit; font-size: 14.5px; cursor: pointer; text-align: left; }
 .side-automation:hover { background: var(--soft); }
@@ -1351,7 +1365,10 @@ button { font-family: inherit; cursor: pointer; }
 
 /* ===== macOS 桌面版：侧栏到顶，红绿灯内嵌（WorkBuddy 同款 hiddenInset）===== */
 .paw-mac .side-head { padding-top: 54px; -webkit-app-region: drag; }
-.paw-mac .side-head button, .paw-mac .side-head a { -webkit-app-region: no-drag; }
+.paw-mac .side-head button,
+.paw-mac .side-head a,
+.paw-mac .side-head input,
+.paw-mac .side-head .side-search { -webkit-app-region: no-drag; }
 .paw-mac .topbar { -webkit-app-region: drag; }
 .paw-mac .topbar button, .paw-mac .topbar select, .paw-mac .topbar input, .paw-mac .topbar a { -webkit-app-region: no-drag; }
 /* Agent 侧栏收起后顶栏顶到窗口左边，标题会撞上红绿灯（14,14）。
@@ -1439,7 +1456,9 @@ body.paw-resizing, body.paw-resizing * { cursor: col-resize !important; user-sel
 /* 浮层从左上角出来，顶部照样给红绿灯留 54px，别把灯压住 */
 .paw-mac .sidebar.collapsed .side-head { padding-top: 54px; -webkit-app-region: drag; }
 .paw-mac .sidebar.collapsed .side-head button,
-.paw-mac .sidebar.collapsed .side-head a { -webkit-app-region: no-drag; }
+.paw-mac .sidebar.collapsed .side-head a,
+.paw-mac .sidebar.collapsed .side-head input,
+.paw-mac .sidebar.collapsed .side-head .side-search { -webkit-app-region: no-drag; }
 .sidebar.collapsed .side-top { flex-direction: row; align-items: center; }
 .sidebar.collapsed .new-btn { display: flex; }
 .rail-btn { display: inline-flex; align-items: center; justify-content: center; width: 38px; height: 38px; border: 0; background: none; color: var(--text-regular); border-radius: 10px; transition: background .15s, color .15s; }
@@ -1800,7 +1819,9 @@ body.paw-resizing-v, body.paw-resizing-v * { cursor: row-resize !important; user
 /* 弹窗自身显式 no-drag：Electron 里 fixed 覆盖层若没声明，
    落在底下 drag 区坐标上时 hover/点击会时灵时不灵（Web 端正常）。 */
 .paw-mac .modal-backdrop,
-.paw-mac .modal-backdrop * { -webkit-app-region: no-drag; }
+.paw-mac .modal-backdrop *,
+.paw-mac .trace-backdrop,
+.paw-mac .trace-backdrop * { -webkit-app-region: no-drag; }
 
 /* ===== 网关 token 配置页（首次启动未配置时） ===== */
 .token-gate { position: fixed; inset: 0; display: flex; flex-direction: column; align-items: center; justify-content: center; background: linear-gradient(160deg, #f3f7fd 0%, #e8f0fa 100%); }

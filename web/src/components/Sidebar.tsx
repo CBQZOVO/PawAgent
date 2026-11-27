@@ -47,6 +47,7 @@ function renderPluginIcon(icon?: string): ReactNode {
 }
 
 /** 左侧栏：品牌 + 新会话 + 可定制菜单 + 会话列表 + 搜索引擎切换 */
+const RECENT_PREVIEW_COUNT = 5;
 export default function Sidebar({
   sessions, activeId, provider, hasKey, providerMenu,
   onNew, onSelect, onDelete, onHandoffSession, onExportSession, onImportSessions, onToggleStrict,
@@ -88,6 +89,7 @@ export default function Sidebar({
   const [dragKey, setDragKey] = useState<string | null>(null);
   const [dragOverKey, setDragOverKey] = useState<string | null>(null);
   const [wsOpen, setWsOpen] = useState<Record<string, boolean>>({});
+  const [recentExpanded, setRecentExpanded] = useState(false);
   const [wsInfo, setWsInfo] = useState<WorkspaceInfo | null>(null);
   const [searchQuery, setSearchQuery] = useState('');
   const [searchHits, setSearchHits] = useState<SessionSearchResult[]>([]);
@@ -404,6 +406,42 @@ export default function Sidebar({
           )}
         </div>
       </div>
+      {!trimmedQuery && (
+        <div className="side-fixed-nav">
+          <div className="side-label">工具与自动化</div>
+          {navItems.map((item) => (
+            <button
+              key={item.key}
+              draggable
+              onDragStart={(e) => {
+                setDragKey(item.key);
+                e.dataTransfer.effectAllowed = 'move';
+                e.dataTransfer.setData('text/plain', item.key);
+              }}
+              onDragOver={(e) => {
+                e.preventDefault();
+                e.dataTransfer.dropEffect = 'move';
+                if (dragOverKey !== item.key) setDragOverKey(item.key);
+              }}
+              onDragLeave={() => { if (dragOverKey === item.key) setDragOverKey(null); }}
+              onDrop={(e) => { e.preventDefault(); handleNavDrop(item.key); }}
+              onDragEnd={() => { setDragKey(null); setDragOverKey(null); }}
+              className={
+                'side-automation'
+                + (item.active ? ' active' : '')
+                + (dragKey === item.key ? ' dragging' : '')
+                + (dragOverKey === item.key && dragKey !== item.key ? ' drag-over' : '')
+              }
+              onClick={item.onClick}
+              title="拖动可调整菜单顺序"
+            >
+              {item.icon}
+              <span className="side-nav-label">{item.label}</span>
+              <GripVertical size={12} className="side-drag-handle" />
+            </button>
+          ))}
+        </div>
+      )}
       <div className="side-scroll-area">
         {trimmedQuery ? (
           <div className="side-search-results">
@@ -441,39 +479,6 @@ export default function Sidebar({
           </div>
         ) : (
           <>
-        <div className="side-label">工具与自动化</div>
-        {navItems.map((item) => (
-          <button
-            key={item.key}
-            draggable
-            onDragStart={(e) => {
-              setDragKey(item.key);
-              e.dataTransfer.effectAllowed = 'move';
-              e.dataTransfer.setData('text/plain', item.key);
-            }}
-            onDragOver={(e) => {
-              e.preventDefault();
-              e.dataTransfer.dropEffect = 'move';
-              if (dragOverKey !== item.key) setDragOverKey(item.key);
-            }}
-            onDragLeave={() => { if (dragOverKey === item.key) setDragOverKey(null); }}
-            onDrop={(e) => { e.preventDefault(); handleNavDrop(item.key); }}
-            onDragEnd={() => { setDragKey(null); setDragOverKey(null); }}
-            className={
-              'side-automation'
-              + (item.active ? ' active' : '')
-              + (dragKey === item.key ? ' dragging' : '')
-              + (dragOverKey === item.key && dragKey !== item.key ? ' drag-over' : '')
-            }
-            onClick={item.onClick}
-            title="拖动可调整菜单顺序"
-          >
-            {item.icon}
-            <span className="side-nav-label">{item.label}</span>
-            <GripVertical size={12} className="side-drag-handle" />
-          </button>
-        ))}
-
         <div className="side-label ws-label-row">
           <span>工作区</span>
           <WorkspacePicker variant="plus" />
@@ -516,7 +521,16 @@ export default function Sidebar({
         <div className="side-label">最近任务</div>
         <div className="session-list">
           {recentSessions.length === 0 && <div className="side-empty">还没有对话</div>}
-          {recentSessions.map((s) => renderSession(s))}
+          {(recentExpanded ? recentSessions : recentSessions.slice(0, RECENT_PREVIEW_COUNT)).map((s) => renderSession(s))}
+          {recentSessions.length > RECENT_PREVIEW_COUNT && (
+            <button
+              type="button"
+              className="side-recent-more"
+              onClick={() => setRecentExpanded((v) => !v)}
+            >
+              {recentExpanded ? '收起' : <>查看更多 ({recentSessions.length}) <ChevronDown size={13} /></>}
+            </button>
+          )}
         </div>
           </>
         )}
