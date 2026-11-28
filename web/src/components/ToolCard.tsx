@@ -3,7 +3,9 @@ import { Bot, Check, ChevronDown, Circle, Copy, Eye, ExternalLink, FileDiff, Fil
 import { toolStepSummary, type ToolCallBlock, type ToolView } from '@paw/shared';
 import { parseSearchOutput } from '../lib/search-results';
 import { computeLineDiff, computeWriteDiff, type DiffLine } from '../lib/diff';
+import { containsMermaidBlock } from '../lib/markdown-mermaid';
 import Favicon from './Favicon';
+import Markdown from './Markdown';
 
 /** 工具调用卡片：生图 / 搜索 / 子代理 / 文件变更 / 通用（read_file、run_command） */
 export default function ToolCard({ tool, members, busy, stopped, onOpenSession, onPreviewFile }: {
@@ -18,7 +20,7 @@ export default function ToolCard({ tool, members, busy, stopped, onOpenSession, 
   /** 点文件名 → 右侧文件预览面板打开它 */
   onPreviewFile?: (path: string) => void;
 }) {
-  const [open, setOpen] = useState(() => SHELL_TOOLS.has(tool.name));
+  const [open, setOpen] = useState(() => SHELL_TOOLS.has(tool.name) || tool.name === 'render_mermaid');
   const [searchOpen, setSearchOpen] = useState(false); // 搜索结果默认折叠
   const [todoOpen, setTodoOpen] = useState(true);      // 任务清单默认展开
   const [cmdCopied, setCmdCopied] = useState(false);
@@ -66,7 +68,7 @@ export default function ToolCard({ tool, members, busy, stopped, onOpenSession, 
             ))}
             {running && <div className="subagent-running"><LoadingDots /> 子代理正在工作…</div>}
             {stopped && sub.status === 'running' && <div className="subagent-running stopped-hint">已停止</div>}
-            {!running && tool.output && <pre className="tool-output subagent-output">{tool.output}</pre>}
+            {!running && tool.output && <ToolOutputText text={tool.output} className="tool-output subagent-output" />}
             {!running && onOpenSession && (
               <button className="subagent-open-session" onClick={() => onOpenSession(sub.id)}>
                 <ExternalLink size={11} /> 打开子会话（完整过程）
@@ -111,9 +113,10 @@ export default function ToolCard({ tool, members, busy, stopped, onOpenSession, 
               ? <div className="shell-loading"><LoadingDots /> 执行中…</div>
               : interrupted
                 ? <div className="shell-loading stopped-hint">已停止（未收到执行结果）</div>
-                : <pre className={'tool-output shell-output' + (tool.ok === false ? ' shell-error' : '')}>
-                  {tool.output || '（无输出）'}
-                </pre>}
+                : <ToolOutputText
+                  text={tool.output || '（无输出）'}
+                  className={'tool-output shell-output' + (tool.ok === false ? ' shell-error' : '')}
+                />}
           </div>
         )}
       </div>
@@ -148,7 +151,7 @@ export default function ToolCard({ tool, members, busy, stopped, onOpenSession, 
           <span className="tool-name">技能</span>
           <ChevronDown size={12} className={open ? 'rot' : ''} />
         </button>
-        {open && tool.output && <pre className="tool-output">{tool.output}</pre>}
+        {open && tool.output && <ToolOutputText text={tool.output} className="tool-output" />}
       </div>
     );
   }
@@ -166,7 +169,7 @@ export default function ToolCard({ tool, members, busy, stopped, onOpenSession, 
           <span className="tool-name">视觉转交</span>
           <ChevronDown size={12} className={open ? 'rot' : ''} />
         </button>
-        {open && tool.output && <pre className="tool-output">{tool.output}</pre>}
+        {open && tool.output && <ToolOutputText text={tool.output} className="tool-output" />}
       </div>
     );
   }
@@ -374,13 +377,22 @@ export default function ToolCard({ tool, members, busy, stopped, onOpenSession, 
       )}
       {open && tool.output && (tool.name === 'read_file'
         ? <NumberedOutput text={tool.output} />
-        : <pre className="tool-output">{tool.output}</pre>)}
+        : <ToolOutputText text={tool.output} className={'tool-output' + (tool.name === 'render_mermaid' ? ' tool-mermaid-output' : '')} />)}
     </div>
   );
 }
 
 function LoadingDots({ light }: { light?: boolean }) {
   return <span className={'loading-dots' + (light ? ' loading-dots-light' : '')} aria-label="执行中"><i /><i /><i /></span>;
+}
+
+/**
+ * 工具输出默认按纯文本展示（日志里的 #、** 不该被当 Markdown）。
+ * 只有输出里含完整 mermaid 代码块时才交给 Markdown 渲染。
+ */
+function ToolOutputText({ text, className }: { text: string; className: string }) {
+  if (!containsMermaidBlock(text)) return <pre className={className}>{text}</pre>;
+  return <div className={`${className} tool-markdown`}><Markdown>{text}</Markdown></div>;
 }
 
 /**

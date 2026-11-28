@@ -13,6 +13,7 @@ import ToolCard from './ToolCard';
 import AskCard from './AskCard';
 import PermissionCard, { type PermissionAskItem } from './PermissionCard';
 import { WidgetCard, type WidgetHostApi } from './WidgetFrame';
+import DeliverableCards from './DeliverableCards';
 
 /** 纯探查类工具：只读、无副作用，连续多个折成一行（见 items 构造处的说明） */
 const PROBE_TOOLS = new Set(['read_file', 'list_dir', 'search_file', 'search_content', 'git_status', 'git_diff', 'git_log', 'memory_search', 'search_parent_session']);
@@ -45,14 +46,18 @@ function foldLabel(group: ToolCallBlock[]): string {
   }
 }
 
-function MessageRow({ m, fallbackModel, streaming, onOpenSession, onPreviewAttachment, onPreviewFile, onRewind, onRevert, onFork, onAnswerAsk, widgetHost, permissionAsks, onDecidePermission, onAllowGlobal, onOpenTrace, planApproval, onApprovePlan }: {  m: ViewMessage;
+function MessageRow({ m, fallbackModel, streaming, workspace, onOpenSession, onPreviewAttachment, onPreviewFile, onOpenFilePanel, onRewind, onRevert, onFork, onAnswerAsk, widgetHost, permissionAsks, onDecidePermission, onAllowGlobal, onOpenTrace, planApproval, onApprovePlan }: {  m: ViewMessage;
   fallbackModel?: string;
   streaming?: boolean;
+  /** 当前会话工作区根目录（解析产物相对路径用） */
+  workspace?: string | null;
   onOpenSession?: (id: string) => void;
   /** 点附件卡片 → 右侧文件预览面板打开它 */
   onPreviewAttachment?: (a: import('@paw/shared').Attachment) => void;
-  /** 点工具卡片里的文件名 → 预览该文件 */
+  /** 点工具卡片或产物卡片里的文件名 → 预览该文件 */
   onPreviewFile?: (path: string) => void;
+  /** 点「查看所有产物」→ 打开右侧文件预览面板 */
+  onOpenFilePanel?: () => void;
   /** 编辑这条用户消息后重发：传新文本 */
   onRewind?: (newText: string, attachments: import('@paw/shared').Attachment[]) => Promise<boolean>;
   /** 回退：把对话和产物恢复到这条消息之前（会先弹确认框，由上层弹） */
@@ -222,11 +227,16 @@ function MessageRow({ m, fallbackModel, streaming, onOpenSession, onPreviewAttac
     if (b.type === 'text' && b.text.trim()) { lastTextIdx = i; break; }
   }
   const headRaw = lastTextIdx > 0 ? blocks.slice(0, lastTextIdx) : [];
-  // widget 是成果块：即使工具在最后一段正文前发射，回复结束后也必须完整可见
-  const head = headRaw.filter((b) => b.type !== 'widget');
+  // 视觉成果块（widget / 成功的 render_mermaid / generate_image）：即使在最后一段正文前发出，
+  // 回复结束后也必须留在折叠区外完整可见，不藏进「已处理 N 步」。
+  const isDeliverableBlock = (b: ContentBlock): boolean =>
+    b.type === 'widget'
+    || (b.type === 'tool-call' && b.name === 'render_mermaid' && b.ok !== false && !!b.output)
+    || (b.type === 'tool-call' && b.name === 'generate_image' && b.ok !== false && !!b.output);
+  const head = headRaw.filter((b) => !isDeliverableBlock(b));
   const turnFold = m.role === 'assistant' && !streaming && head.length > 0;
-  /** 折叠区之外、按顺序正常渲染的块（部件从折叠区摘出，回到原顺序） */
-  const bodyBlocks = turnFold ? blocks.filter((b, i) => i >= lastTextIdx || b.type === 'widget') : blocks;
+  /** 折叠区之外、按顺序正常渲染的块（成果块从折叠区摘出，回到原顺序） */
+  const bodyBlocks = turnFold ? blocks.filter((b, i) => i >= lastTextIdx || isDeliverableBlock(b)) : blocks;
   /** 折叠条上的步数：工具调用数（提问卡不算「步」） */
   const headSteps = head.filter((b) => b.type === 'tool-call').length;
 
@@ -298,6 +308,7 @@ function MessageRow({ m, fallbackModel, streaming, onOpenSession, onPreviewAttac
                   return <ToolCard key={b.id} tool={b} busy={false} stopped={m.stopped}
                     onOpenSession={onOpenSession} onPreviewFile={onPreviewFile} />;
                 }
+                if (b.type !== 'text') return null;
                 const src = extractSources(b.text);
                 return (
                   <div className="answer" key={`htxt-${i}`}>
@@ -365,6 +376,14 @@ function MessageRow({ m, fallbackModel, streaming, onOpenSession, onPreviewAttac
           ))}
         </div>
       )}
+      {!streaming && blocks.length > 0 && (
+        <DeliverableCards
+          m={m}
+          workspace={workspace}
+          onPreviewFile={onPreviewFile}
+          onOpenAll={onOpenFilePanel}
+        />
+      )}
       {m.error && <div className="msg-error">⚠️ {m.error}</div>}
       {blocks.length > 0 ? (
         // 底部工具条：生成中标识 + 耗时轨迹入口 + 复制 + 模型名（跟着最后一块走，不跟着正文走）
@@ -428,6 +447,7 @@ function LoadingDots() {
 export default memo(MessageRow, (a, b) =>
   a.m === b.m
   && a.streaming === b.streaming
+  && a.workspace === b.workspace
   && a.fallbackModel === b.fallbackModel
   && a.widgetHost === b.widgetHost
   && a.permissionAsks === b.permissionAsks

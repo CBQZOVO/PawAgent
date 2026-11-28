@@ -33,8 +33,8 @@ export {
   verifyPolicyRuleTable,
 };
 
-/** 内部控制类工具不弹确认卡（subagent 内部工具执行会继承父会话 authorize） */
-const INTERNAL_SAFE_TOOLS = new Set(['todo_write', 'ask_user', 'structured_output', 'subagent']);
+/** 内部控制类/纯展示工具不弹确认卡（subagent 内部工具执行会继承父会话 authorize） */
+const INTERNAL_SAFE_TOOLS = new Set(['todo_write', 'render_mermaid', 'ask_user', 'structured_output', 'subagent']);
 
 export const APPROVAL_TIMEOUT_MS = 300_000;
 

@@ -27,6 +27,7 @@ export { canonicalToolKey, parseToolArguments };
 /** 纯元信息/外部只读工具：完全不碰本地工作区文件，与任何文件读写都零冲突，可任意并发 */
 const ISOLATED_META_READONLY_TOOLS = new Set([
   'todo_write',
+  'render_mermaid',
   'web_search',
   'web_fetch',
   'search_parent_session',

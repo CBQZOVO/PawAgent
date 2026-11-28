@@ -41,7 +41,7 @@ const tools: ToolRuntime = {
   isPrunable: (name) => name === 'echo_read',
   execute: async (_name, args, id) => {
     executed.push(String(args.id));
-    return { tool_call_id: id, content: `${args.id}:` + 'x'.repeat(15_000), isError: false };
+    return { tool_call_id: id, content: `${args.id}:` + 'x'.repeat(20_000), isError: false };
   },
 };
 
@@ -90,7 +90,7 @@ reg.register({
     {
       schema: { name: 'demo_read', description: 'read', parameters: { type: 'object', properties: {} } },
       meta: { readOnly: true, prunable: true, pruneHint: '请缩小查询范围' },
-      execute: () => 'A'.repeat(15_000),
+      execute: () => 'A'.repeat(20_000),
     },
     {
       schema: { name: 'demo_write', description: 'write', parameters: { type: 'object', properties: { dry_run: { type: 'boolean' } } } },
@@ -109,10 +109,10 @@ assert.deepEqual(reg.getSchemas({ allowWrite: true }).map((s) => s.name), ['demo
 assert.equal(reg.isReadOnly('demo_read'), true);
 assert.equal(reg.isMutating('demo_write', { dry_run: true }), false);
 assert.equal(reg.isMutating('demo_write', { dry_run: false }), true);
-assert.match(reg.formatHistoryResult('demo_read', 'A'.repeat(15_000), 1)!, /请缩小查询范围/);
+assert.match(reg.formatHistoryResult('demo_read', 'A'.repeat(20_000), 1)!, /请缩小查询范围/);
 // 注册表级 onTruncate：prunable 工具裁剪时经注册表钩子拿到全文并拼提示
 reg.onTruncate = (full, name) => `落盘(${name}:${full.length})`;
-assert.match(reg.formatHistoryResult('demo_read', 'A'.repeat(15_000), 1)!, /落盘\(demo_read:15000\)/);
+assert.match(reg.formatHistoryResult('demo_read', 'A'.repeat(20_000), 1)!, /落盘\(demo_read:20000\)/);
 reg.onTruncate = undefined;
 assert.deepEqual(await reg.collectPromptBlocks(), ['<demo_plugin>active</demo_plugin>']);
 const rt = reg.toToolRuntime({ pluginCtx: { allowWrite: true } });
@@ -361,6 +361,41 @@ assert.equal(rtRes.isError, false);
     isMutatingApi: false,
     isReadOnlyShell: false,
   }).effect, 'allow');
+
+  // 6. runSubagent：最终结论仅取最后一轮正文，不被中间探查旁白挤占 500 字摘要
+  const { runSubagent } = await import('../src/subagent.js');
+  let subRound = 0;
+  let doneSummary = '';
+  const subRes = await runSubagent(
+    { subagent_name: 'reviewer', description: '审查实现', prompt: '审查代码' },
+    'sub-tc-1',
+    {
+      loadDefs: () => [{ name: 'reviewer', description: 'review', tools: ['read_file'], prompt: 'review' }],
+      createStreamChat: () => ({
+        model: 'demo',
+        streamChat: async function* () {
+          subRound++;
+          if (subRound === 1) {
+            yield { content: '我先检查一下工作区状态和文件列表。' };
+            yield { toolCalls: [{ index: 0, id: 't1', name: 'read_file', arguments: '{}' }] };
+            return;
+          }
+          yield { content: '最终结论：发现 2 个边界问题并已定位到具体行号。' };
+        },
+      }),
+      tools: {
+        getSchemas: () => [{ name: 'read_file', description: 'read', parameters: { type: 'object', properties: {} } }],
+        execute: async (_n, _a, id) => ({ tool_call_id: id, content: 'file body' }),
+      },
+      emit: (ev) => {
+        if (ev.type === 'subagent_done') doneSummary = ev.summary;
+      },
+    },
+  );
+  assert.equal(subRes.isError, false);
+  assert.match(subRes.content, /最终结论：发现 2 个边界问题/);
+  assert.ok(!subRes.content.includes('我先检查一下工作区状态'), '不应把中间旁白混进最终结论');
+  assert.match(doneSummary, /^最终结论：发现 2 个边界问题/, '前端 500 字摘要应直接展示最终结论');
 }
 
 console.log('✓ @paw/kernel standalone tests passed');

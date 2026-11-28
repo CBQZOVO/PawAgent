@@ -15,8 +15,9 @@ export interface PruneOptions {
 }
 
 const DEFAULTS = {
-  sparseHeadChars: 10_000,
-  sparseTailChars: 2_000,
+  // 1~2 个文件读取时放宽到 14k+3k（约 400~500 行源码），避免 12KB~16KB 正常源码文件被拦腰截断而白耗额外读取轮次
+  sparseHeadChars: 14_000,
+  sparseTailChars: 3_000,
   normalHeadChars: 6_000,
   normalTailChars: 1_500,
   denseHeadChars: 2_500,

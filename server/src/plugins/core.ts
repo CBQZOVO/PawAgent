@@ -3,6 +3,7 @@ import { TODO_TOOL_SCHEMA, executeTodoWrite } from '../tools/todo.js';
 import { SKILL_TOOL_SCHEMAS, executeSkillTool } from '../tools/skills.js';
 import { ASK_USER_SCHEMA } from '../tools/ask-user.js';
 import { SEARCH_PARENT_SESSION_SCHEMA, executeSearchParentSession } from '../tools/parent-session.js';
+import { RENDER_MERMAID_SCHEMA, executeRenderMermaid } from '../tools/mermaid.js';
 import type { ServerToolExecCtx } from './types.js';
 
 export const corePlugin: PawPlugin<ServerToolExecCtx> = {
@@ -12,6 +13,11 @@ export const corePlugin: PawPlugin<ServerToolExecCtx> = {
       schema: TODO_TOOL_SCHEMA,
       meta: { readOnly: true },
       execute: (args) => executeTodoWrite(args),
+    },
+    {
+      schema: RENDER_MERMAID_SCHEMA,
+      meta: { readOnly: true },
+      execute: (args, toolCallId) => executeRenderMermaid(args, toolCallId),
     },
     ...SKILL_TOOL_SCHEMAS.map((schema) => ({
       schema,

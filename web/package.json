@@ -8,7 +8,7 @@
     "build": "vite build",
     "preview": "vite preview",
     "typecheck": "tsc --noEmit",
-    "test": "cd .. && pnpm --filter @paw/server exec tsx ../web/tests/attachments.test.ts && pnpm --filter @paw/server exec tsx ../web/tests/dnd-files.test.ts && pnpm --filter @paw/server exec tsx ../web/tests/session-sync.test.ts && pnpm --filter @paw/server exec tsx ../web/tests/widget-path.test.ts && pnpm --filter @paw/server exec tsx ../web/tests/markdown-html.test.ts && pnpm --filter @paw/server exec tsx ../web/tests/markdown-math.test.ts && pnpm --filter @paw/server exec tsx ../web/tests/highlight.test.ts && pnpm --filter @paw/server exec tsx ../web/tests/composer-tokens.test.ts"
+    "test": "cd .. && pnpm --filter @paw/server exec tsx ../web/tests/attachments.test.ts && pnpm --filter @paw/server exec tsx ../web/tests/dnd-files.test.ts && pnpm --filter @paw/server exec tsx ../web/tests/session-sync.test.ts && pnpm --filter @paw/server exec tsx ../web/tests/widget-path.test.ts && pnpm --filter @paw/server exec tsx ../web/tests/markdown-html.test.ts && pnpm --filter @paw/server exec tsx ../web/tests/markdown-math.test.ts && pnpm --filter @paw/server exec tsx ../web/tests/mermaid.test.ts && pnpm --filter @paw/server exec tsx ../web/tests/highlight.test.ts && pnpm --filter @paw/server exec tsx ../web/tests/composer-tokens.test.ts"
   },
   "dependencies": {
     "@monaco-editor/react": "^4.7.0",
@@ -17,6 +17,7 @@
     "@xterm/xterm": "^6.0.0",
     "katex": "^0.16.47",
     "lucide-react": "^0.468.0",
+    "mermaid": "^12.3.0",
     "monaco-editor": "^0.57.0",
     "prosemirror-dropcursor": "^1.8.4",
     "prosemirror-history": "^1.5.2",

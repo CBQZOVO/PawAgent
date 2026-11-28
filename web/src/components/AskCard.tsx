@@ -7,6 +7,8 @@
 import { useState } from 'react';
 import { Check, HelpCircle } from 'lucide-react';
 import type { AskQuestion } from '@paw/shared';
+import { containsMermaidBlock } from '../lib/markdown-mermaid';
+import Markdown from './Markdown';
 
 /** 用户什么都没选就点「跳过」时发出去的话，让模型知道该自己拿主意 */
 const SKIP_TEXT = '（这组问题我跳过了，你按自己认为最合理的方式继续，把假设写清楚就行）';
@@ -109,7 +111,9 @@ export default function AskCard({ questions, answer, onSubmit }: {
           <div className="askcard-item" key={i}>
             <div className="askcard-q">
               <span className="askcard-idx">{i + 1}</span>
-              <span className="askcard-q-text">{q.question}</span>
+              {containsMermaidBlock(q.question)
+                ? <div className="askcard-q-text askcard-q-markdown"><Markdown>{q.question}</Markdown></div>
+                : <span className="askcard-q-text">{q.question}</span>}
               <span className="askcard-tag">{multi ? '多选' : '单选'}</span>
             </div>
             {opts.length > 0 && (

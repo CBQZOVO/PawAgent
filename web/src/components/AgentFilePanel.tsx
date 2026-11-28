@@ -3,6 +3,7 @@ import { ChevronRight, Copy, ExternalLink, FileText, Folder, RefreshCw, X } from
 import { messageTools, type Attachment, type ViewMessage } from '@paw/shared';
 import { getFsFile, getFsTree, getOfficePreview, type FsEntry, type FsFile } from '../api/client';
 import { inlineMediaSrc } from '../lib/attachments';
+import { extractMessageDeliverables } from '../lib/deliverables';
 import { extOf, fileBadgeStyle, isRawPreviewable, MONACO_LANG } from '../lib/file-preview';
 import MarkdownPreview from './MarkdownPreview';
 import CodeEditor from './CodeEditor';
@@ -156,6 +157,9 @@ export function collectPreviewFiles(messages: ViewMessage[]): PreviewFile[] {
         }
       }
     }
+    for (const d of extractMessageDeliverables(m)) {
+      if (!map.has(d.name)) map.set(d.name, { key: d.name, name: d.name, path: d.path, source: 'tool' });
+    }
     for (const a of m.attachments || []) {
       const existing = map.get(a.name);
       // 附件保留了 Electron 本机路径时，右侧面板可以直接交给 Office 引擎预览原件。
@@ -208,9 +212,16 @@ export default function AgentFilePanel({ files, root, editorTheme, onAddToChat, 
     } else if (previewRequest.path) {
       const p = previewRequest.path;
       key = p.split(/[\\/]/).pop() || p;
-      // 工具文件通常已在 files 里；万一没有（历史会话），补一个带 path 的条目
-      const existing = allFiles.find((f) => f.key === key || f.path === p);
-      if (existing) key = existing.key;
+      // 工具文件通常已在 files 里；若来自脚本产物或历史会话，补一条到 extraFiles 确保能立刻预览
+      // 优先精确匹配完整路径，避免同名不同目录的文件互相错开
+      const existing = allFiles.find((f) => f.path === p) ?? allFiles.find((f) => f.key === key);
+      if (existing) {
+        key = existing.key;
+      } else {
+        const entry: PreviewFile = { key: p, name: key, path: p, source: 'tool' };
+        key = entry.key;
+        setExtraFiles((prev) => prev.some((x) => x.key === entry.key) ? prev : [...prev, entry]);
+      }
       setOpenKeys((prev) => prev.includes(key) ? prev : [...prev, key]);
     } else return;
     setActiveKey(key);
@@ -348,7 +359,8 @@ function FilePreview({ file, root, editorTheme, cache, loadTick, onReload, onCac
   const content = cache?.content ?? file.inline?.content ?? '';
   const isImage = file.inline?.kind === 'image' || /\.(png|jpe?g|gif|webp|bmp)$/i.test(file.name);
   const isPdf = /\.pdf$/i.test(file.name);
-  const isMd = /^(md|markdown)$/i.test(ext);
+  // 与 IdePanel 的 isMarkdown 保持一致：mdx 也走 MarkdownPreview，不落到 Monaco 纯源码
+  const isMd = /^(md|markdown|mdx)$/i.test(ext);
 
   const src = useMemo(() => {
     if (file.inline?.content && (isImage || isPdf)) {

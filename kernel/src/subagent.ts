@@ -152,6 +152,8 @@ export async function runSubagent(
 
   let status: SubagentStatus = 'completed';
   let output = '';
+  // 只记录最后一轮（无后续工具调用）的正文，避免中间过渡旁白（如「我先看看…」）挤占结论与前端 500 字预览
+  let finalRoundOutput = '';
   let rounds = 0;
   let toolCount = 0;
   let prevWasTool = false;
@@ -181,9 +183,10 @@ export async function runSubagent(
     })) {
       const forward: AgentEvent | null = (ev.type === 'text' || ev.type === 'tool_start' || ev.type === 'tool_done') ? ev : null;
       if (ev.type === 'text' || ev.type === 'reasoning') { prevWasTool = false; }
-      if (ev.type === 'text') { output += ev.delta; appendText(assistant, ev.delta); }
+      if (ev.type === 'text') { output += ev.delta; finalRoundOutput += ev.delta; appendText(assistant, ev.delta); }
       else if (ev.type === 'reasoning') assistant.reasoning = (assistant.reasoning || '') + ev.delta;
       else if (ev.type === 'tool_start') {
+        finalRoundOutput = '';
         if (!prevWasTool) rounds++; prevWasTool = true; toolCount++;
         appendTool(assistant, { type: 'tool-call', id: ev.id, name: ev.name, summary: ev.summary, args: ev.args });
         if (ev.name === 'structured_output' && wantStructured) {
@@ -245,7 +248,7 @@ export async function runSubagent(
   };
   let body = wantStructured && structuredData !== undefined
     ? '```json\n' + JSON.stringify(structuredData, null, 2) + '\n```'
-    : output.trim();
+    : (finalRoundOutput.trim() || output.trim());
   if (body.length > MAX_OUTPUT_CHARS) body = body.slice(0, MAX_OUTPUT_CHARS) + '\n…（结论过长已截断，完整过程见子会话）';
   if (!body) body = assistant.error || '子代理没有给出结论';
   const tokenInfo = usage.prompt || usage.completion ? `，tokens ${usage.prompt}+${usage.completion}` : '';

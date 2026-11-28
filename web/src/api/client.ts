@@ -571,6 +571,40 @@ export async function saveWorkspaceFile(root: string, file: string, content: str
   } catch { return { error: '网络错误' }; }
 }
 
+export interface FileStatInfo { exists: boolean; size?: number; isDir?: boolean; absPath?: string }
+const statCache = new Map<string, { at: number; info: FileStatInfo }>();
+const STAT_CACHE_MS = 15_000;
+/** 批量检查产物文件是否存在及文件大小（带 15s 短缓存，避免列表重渲染重复请求） */
+export async function statFiles(paths: string[], root?: string | null): Promise<Record<string, FileStatInfo>> {
+  const uniq = [...new Set(paths.filter(Boolean))];
+  const out: Record<string, FileStatInfo> = {};
+  const missing: string[] = [];
+  const now = Date.now();
+  const prefix = `${root || ''}::`;
+  for (const p of uniq) {
+    const hit = statCache.get(prefix + p);
+    if (hit && now - hit.at < STAT_CACHE_MS) out[p] = hit.info;
+    else missing.push(p);
+  }
+  if (!missing.length) return out;
+  try {
+    const r = await fetch('/api/fs/stat', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ paths: missing, root: root || undefined }),
+    });
+    if (r.ok) {
+      const d = (await r.json()) as { items?: Record<string, FileStatInfo> };
+      if (statCache.size > 256) statCache.clear();
+      for (const [k, v] of Object.entries(d.items || {})) {
+        out[k] = v;
+        statCache.set(prefix + k, { at: now, info: v });
+      }
+    }
+  } catch { /* ignore */ }
+  return out;
+}
+
 // ===== 腾讯文档引擎：Office 文件预览 =====
 export interface OfficeStatus { available: boolean; port: number }
 export async function getOfficeStatus(): Promise<OfficeStatus> {

@@ -915,6 +915,41 @@ await atest('db.getContextReading：兼容旧版 6 字段 byCategory 历史样�
   }
 });
 
+await atest('render_mermaid：注册在默认工具列表、支持剥离围栏与语法校验', async () => {
+  const { getAllToolSchemas } = await import('../src/tools/index.js');
+  const schemas = await getAllToolSchemas(null);
+  assert.ok(schemas.some((t) => t.name === 'render_mermaid'), '默认工具列表应包含 render_mermaid');
+
+  const ok = await executeTool('render_mermaid', {
+    title: '请求链路',
+    code: '```mermaid\nflowchart TD\n  A["前端"] --> B["后端"]\n```',
+  }, 'rm-1', {});
+  assert.equal(ok.isError, false);
+  assert.match(ok.content, /#### 请求链路/);
+  assert.match(ok.content, /```mermaid\nflowchart TD/);
+
+  const badHead = await executeTool('render_mermaid', { code: 'not a diagram' }, 'rm-2', {});
+  assert.equal(badHead.isError, true);
+  assert.match(badHead.content, /不是已支持的 Mermaid 图类型/);
+
+  const badSub = await executeTool('render_mermaid', { code: 'flowchart TD\n  subgraph G\n    A --> B' }, 'rm-3', {});
+  assert.equal(badSub.isError, true);
+  assert.match(badSub.content, /补齐缺失的 end/);
+});
+
+await atest('git_diff(staged=true) 在非 Git 目录返回带路径的友好提示，不泄出 --no-index 报错', async () => {
+  const nonGit = await mkdtemp(path.join(tmpdir(), 'paw-nongit-'));
+  try {
+    const r = await executeTool('git_diff', { staged: true }, 'gd-ng', { workspace: nonGit });
+    assert.equal(r.isError, true);
+    assert.match(r.content, /不是 git 仓库/);
+    assert.ok(r.content.includes(nonGit), '错误提示应带出已检查的目录路径，避免 Agent 换绝对路径重复试错');
+    assert.ok(!r.content.includes('unknown option'), '不应泄出 git diff --no-index 的 unknown option 报错');
+  } finally {
+    await rm(nonGit, { recursive: true, force: true });
+  }
+});
+
 await rm(tmp, { recursive: true, force: true });
 
 console.log(`\n${pass} 项通过`);

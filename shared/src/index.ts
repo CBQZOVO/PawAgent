@@ -89,6 +89,7 @@ export function toolStepSummary(
     case 'open_browser': return one(a.url) ? `打开网页 ${one(a.url)}` : '打开内置浏览器';
     case 'run_command': return one(a.cmd) || '执行命令';
     case 'generate_image': return '生成图片';
+    case 'render_mermaid': return one(a.title) ? `绘制图表：${one(a.title)}` : '绘制 Mermaid 图表';
     case 'git_status': return '查看仓库状态';
     case 'git_diff': return '查看代码差异';
     case 'git_log': return '查看提交记录';

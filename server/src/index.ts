@@ -244,6 +244,29 @@ app.get('/api/fs/raw', async (c) => {
     'X-Content-Type-Options': 'nosniff',
   });
 });
+// 批量查询本机产物文件是否存在与大小（用于消息底部产物卡片展示真实字节数并过滤无效路径）
+app.post('/api/fs/stat', async (c) => {
+  const body = await c.req.json().catch(() => ({})) as { paths?: unknown; root?: string | null };
+  const rawPaths = Array.isArray(body.paths)
+    ? body.paths.filter((p): p is string => typeof p === 'string' && p.trim().length > 0).slice(0, 24)
+    : [];
+  const baseRoot = (typeof body.root === 'string' && body.root.trim()) ? body.root.trim() : await getWorkspaceRoot();
+  const items: Record<string, { exists: boolean; size?: number; isDir?: boolean; absPath?: string }> = {};
+  await Promise.all(rawPaths.map(async (p) => {
+    if (!path.isAbsolute(p) && !baseRoot) {
+      items[p] = { exists: false };
+      return;
+    }
+    const abs = path.isAbsolute(p) ? p : path.resolve(baseRoot!, p);
+    try {
+      const st = await stat(abs);
+      items[p] = { exists: true, size: st.size, isDir: st.isDirectory(), absPath: abs };
+    } catch {
+      items[p] = { exists: false };
+    }
+  }));
+  return c.json({ items });
+});
 // ---------------------------------------------------------------- 本地 Office 预览（腾讯文档 editor_sdk）
 // 懒启动；二进制缺失 / 启动失败返回明确错误，不影响 Paw 其余功能。
 app.get('/api/office/status', async (c) => {

@@ -159,12 +159,13 @@ async function runGit(cmd: string, cwd: string, signal?: AbortSignal): Promise<s
   } catch (e) {
     const err = e as Error & { stderr?: string; stdout?: string };
     const msg = (err.stderr || err.message || '').trim();
-    if (/not a git repository/i.test(msg)) {
+    // git diff --cached 在非 git 目录会退化为 --no-index 并报 unknown option `cached'，一并归类为非 git 仓库
+    if (/not a git repository|unknown option [`']cached['`]/i.test(msg)) {
       const subRepos = await findChildGitRepos(cwd);
       if (subRepos.length) {
-        throw new Error(`当前工作区根目录不是 Git 仓库，但发现以下子目录是独立 Git 仓库：${subRepos.join('、')}。请通过 path 参数传入具体子仓库路径。`);
+        throw new Error(`当前目录（${cwd}）不是 Git 仓库，但发现以下子目录是独立 Git 仓库：${subRepos.join('、')}。请通过 path 参数传入具体子仓库路径。`);
       }
-      throw new Error('当前目录不是 git 仓库');
+      throw new Error(`当前目录（${cwd}）不是 git 仓库（无需重复尝试 git 工具，请改用 read_file / list_dir / search_content 查看文件）`);
     }
     throw new Error(msg.slice(0, 500));
   }

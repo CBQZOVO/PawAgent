@@ -1,6 +1,6 @@
-import { useEffect, useRef, useState } from 'react';
+import { useEffect, useMemo, useRef, useState } from 'react';
 import { ChevronsLeft, ChevronsRight } from 'lucide-react';
-import ReactMarkdown from 'react-markdown';
+import ReactMarkdown, { type Components } from 'react-markdown';
 import remarkGfm from 'remark-gfm';
 import remarkMath from 'remark-math';
 import rehypeRaw from 'rehype-raw';
@@ -8,6 +8,7 @@ import rehypeSanitize from 'rehype-sanitize';
 import rehypeKatex from 'rehype-katex';
 import { mdSchema, resolveWorkspaceSrc } from '../lib/markdown-schema';
 import { normalizeLatexDelimiters, remarkMathGuard } from '../lib/markdown-math';
+import { mermaidComponents } from './MermaidBlock';
 import 'katex/dist/katex.min.css';
 
 const REMARK_PLUGINS = [remarkGfm, remarkMath, remarkMathGuard];
@@ -56,7 +57,7 @@ function Outline({ content, bodyRef }: { content: string; bodyRef: React.RefObje
 }
 
 /**
- * Markdown 预览（GitHub 风格排版 + LaTeX 公式 + 可折叠大纲侧栏）。
+ * Markdown 预览（GitHub 风格排版 + LaTeX 公式 + Mermaid 图 + 可折叠大纲侧栏）。
  *
  * 原始 HTML 必须解析：GitHub README 里 `<div align="center">` 包横幅、
  * `<img width="24px">` 排图标表、`<br>` 换行都是常规写法。
@@ -70,6 +71,19 @@ export default function MarkdownPreview({ content, root, filePath }: {
   filePath: string;
 }) {
   const bodyRef = useRef<HTMLDivElement>(null);
+  const components = useMemo<Components>(() => ({
+    ...mermaidComponents,
+    a: ({ href, children, ...rest }) => {
+      const external = !!href && /^(https?:|mailto:)/i.test(href);
+      return external
+        ? <a {...rest} href={href} target="_blank" rel="noreferrer noopener">{children}</a>
+        : <span className="md-local-link" title={href}>{children}</span>;
+    },
+    img: ({ src, alt, ...rest }) => (
+      <img {...rest} className="md-img" alt={alt || ''} loading="lazy"
+        src={resolveWorkspaceSrc(typeof src === 'string' ? src : undefined, root, filePath)} />
+    ),
+  }), [root, filePath]);
   return (
     <div className="md-preview">
       <div className="md-flex">
@@ -77,18 +91,7 @@ export default function MarkdownPreview({ content, root, filePath }: {
           <ReactMarkdown
             remarkPlugins={REMARK_PLUGINS}
             rehypePlugins={REHYPE_PLUGINS}
-            components={{
-              a: ({ href, children, ...rest }) => {
-                const external = !!href && /^(https?:|mailto:)/i.test(href);
-                return external
-                  ? <a {...rest} href={href} target="_blank" rel="noreferrer noopener">{children}</a>
-                  : <span className="md-local-link" title={href}>{children}</span>;
-              },
-              img: ({ src, alt, ...rest }) => (
-                <img {...rest} className="md-img" alt={alt || ''} loading="lazy"
-                  src={resolveWorkspaceSrc(typeof src === 'string' ? src : undefined, root, filePath)} />
-              ),
-            }}
+            components={components}
           >
             {normalizeLatexDelimiters(content)}
           </ReactMarkdown>

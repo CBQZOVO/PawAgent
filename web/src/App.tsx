@@ -1859,6 +1859,7 @@ export default function App() {
                     : undefined;
                   return <MessageRow key={m.id} m={m} fallbackModel={model}
                     streaming={runningIds.has(activeId) && gi === msgTotal - 1 && m.role === 'assistant'}
+                    workspace={active.workspace ?? ideRoot ?? null}
                     onOpenSession={(id) => void openSubagentSession(id, active.id)}
                     onPreviewAttachment={(a) => {
                       setBrowserOpen(false);
@@ -1869,6 +1870,10 @@ export default function App() {
                       setBrowserOpen(false);
                       setFilePanelOpen(true);
                       setPreviewRequest({ id: Date.now(), path });
+                    }}
+                    onOpenFilePanel={() => {
+                      setBrowserOpen(false);
+                      setFilePanelOpen(true);
                     }}
                     onRewind={runningIds.has(active.id) ? undefined : (text, atts) => rewindTo(active.id, m.id, text, atts)}
                     onRevert={() => setRevertAsk({ sid: active.id, msgId: m.id })}
