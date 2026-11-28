@@ -640,6 +640,15 @@ export async function downloadOfficeEngine(): Promise<OfficeStatus> {
   if (!r.ok) throw new Error(d.error || `HTTP ${r.status}`);
   return d;
 }
+export interface OfficeDownloadProgress { downloading: boolean; downloaded: number; total: number | null }
+/** 下载期间轮询：服务端统计已落盘字节与 Content-Length */
+export async function getOfficeDownloadProgress(): Promise<OfficeDownloadProgress> {
+  try {
+    return await (await fetch('/api/office/download/progress')).json();
+  } catch {
+    return { downloading: false, downloaded: 0, total: null };
+  }
+}
 
 // ===== IDE 内置终端 =====
 export interface TerminalInfo { shell: string; shellName: string; cwd: string; sessions: number; maxSessions: number }

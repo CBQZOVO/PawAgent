@@ -76,7 +76,7 @@ import { runTask, startScheduler } from './scheduler.js';
 import { loadSearchConfig, saveSearchProvider, type SearchProviderName } from './tools/web-search.js';
 import { DATA_DIR } from './paths.js';
 import { notifyDone } from './notify.js';
-import { buildPreviewUrl, getOfficeStatus, installOfficeEngine } from './office-engine.js';
+import { buildPreviewUrl, getOfficeDownloadProgress, getOfficeStatus, installOfficeEngine } from './office-engine.js';
 
 const DEFAULT_GATEWAY_URL = 'https://api.inspurai.cc';
 // 网关配置（GATEWAY_URL / GATEWAY_KEY）统一存于 ~/.paw/gateway-config.json（0600 权限）
@@ -284,6 +284,8 @@ app.post('/api/office/download', async (c) => {
   if (!s.available) return c.json({ error: s.error || 'Office 引擎安装失败', port: s.port }, 500);
   return c.json({ available: true, port: s.port });
 });
+// 下载期间前端轮询这个只读快照显示进度（无副作用，不触发引擎启动）
+app.get('/api/office/download/progress', (c) => c.json(getOfficeDownloadProgress()));
 app.get('/api/office/preview', async (c) => {
   const raw = c.req.query('path')?.trim();
   if (!raw) return c.json({ error: '缺少 path' }, 400);
@@ -299,7 +301,7 @@ app.get('/api/office/preview', async (c) => {
     const s = await stat(abs);
     if (!s.isFile()) return c.json({ error: `不是文件：${abs}` }, 400);
   } catch {
-    return c.json({ error: `文件不存在：${abs}` }, 404);
+    return c.json({ error: `文件不存在：${abs}`, code: 'OFFICE_FILE_NOT_FOUND' }, 404);
   }
 
   let url: string;

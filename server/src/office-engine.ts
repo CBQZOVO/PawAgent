@@ -11,7 +11,7 @@ import { createWriteStream, existsSync, mkdirSync, statSync } from 'node:fs';
 import { chmod, mkdir, rename, rm } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
-import { Readable } from 'node:stream';
+import { Readable, Transform } from 'node:stream';
 import { pipeline } from 'node:stream/promises';
 
 export const DEFAULT_PORT = 39177;
@@ -104,6 +104,19 @@ export function resolveOfficeBinary(): string {
   return path.join(officeDataDir(), 'office', editorBinaryName());
 }
 
+export type OfficeDownloadProgress = {
+  downloading: boolean;
+  downloaded: number;
+  /** HTTP 没给 Content-Length 时为 null，前端只显示已下载大小 */
+  total: number | null;
+};
+
+let downloadProgress: OfficeDownloadProgress = { downloading: false, downloaded: 0, total: null };
+/** 只读快照，供 /api/office/download/progress 轮询；全过程只有一次下载，不需要按请求区分。 */
+export function getOfficeDownloadProgress(): OfficeDownloadProgress {
+  return { ...downloadProgress };
+}
+
 /** 流式下载 editor_sdk 到目标路径，写入 .part 后原子重命名并赋 0755 执行权限。 */
 export async function downloadOfficeBinary(
   dest: string,
@@ -118,8 +131,18 @@ export async function downloadOfficeBinary(
     if (!resp.ok || !resp.body) {
       throw new Error(`HTTP ${resp.status} ${resp.statusText}`);
     }
+    const totalHeader = Number(resp.headers.get('content-length'));
+    const total = Number.isFinite(totalHeader) && totalHeader > 0 ? totalHeader : null;
+    downloadProgress = { downloading: true, downloaded: 0, total };
     const nodeStream = Readable.fromWeb(resp.body as unknown as import('node:stream/web').ReadableStream);
-    await pipeline(nodeStream, createWriteStream(part));
+    // Transform 只计数不改字节，pipeline 自然保留背压；前端轮询快照即可拿到实时进度。
+    const counter = new Transform({
+      transform(chunk, _encoding, callback) {
+        downloadProgress = { ...downloadProgress, downloaded: downloadProgress.downloaded + chunk.length };
+        callback(null, chunk);
+      },
+    });
+    await pipeline(nodeStream, counter, createWriteStream(part));
     if (process.platform !== 'win32') await chmod(part, 0o755);
     // Windows Defender 实时扫描刚写完的 230MB .part 时会短暂锁句柄，rename 遇 EPERM/EBUSY/EACCES 退避重试
     for (let i = 0; ; i++) {
@@ -135,9 +158,11 @@ export async function downloadOfficeBinary(
         throw err;
       }
     }
+    downloadProgress = { downloading: false, downloaded: total ?? downloadProgress.downloaded, total };
     console.log(`[office] 引擎下载完成：${dest}`);
     return dest;
   } catch (e) {
+    downloadProgress = { downloading: false, downloaded: 0, total: null };
     await rm(part, { force: true }).catch(() => undefined);
     throw new Error(`Office 引擎下载失败（${url}）：${(e as Error).message}`);
   }

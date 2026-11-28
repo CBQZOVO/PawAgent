@@ -1,8 +1,8 @@
 import { useEffect, useMemo, useRef, useState, type ReactNode } from 'react';
 import { createPortal } from 'react-dom';
-import { ChevronRight, Copy, Download, ExternalLink, FileText, Folder, RefreshCw, X } from 'lucide-react';
+import { Check, ChevronRight, Copy, Download, ExternalLink, FileText, FileX, Folder, RefreshCw, X } from 'lucide-react';
 import { messageTools, type Attachment, type ViewMessage } from '@paw/shared';
-import { downloadOfficeEngine, getFsFile, getFsTree, getOfficePreview, OfficeError, type FsEntry, type FsFile } from '../api/client';
+import { downloadOfficeEngine, getFsFile, getFsTree, getOfficeDownloadProgress, getOfficePreview, OfficeError, type FsEntry, type FsFile, type OfficeDownloadProgress } from '../api/client';
 import { inlineMediaSrc } from '../lib/attachments';
 import { extractMessageDeliverables } from '../lib/deliverables';
 import { extOf, fileBadgeStyle, isRawPreviewable, MONACO_LANG } from '../lib/file-preview';
@@ -44,20 +44,44 @@ const OFFICE_EXT = new Set(['doc', 'docx', 'xls', 'xlsx', 'csv', 'ppt', 'pptx', 
 function isOfficeExt(ext: string): boolean {
   return OFFICE_EXT.has(ext.toLowerCase());
 }
+function formatMb(bytes: number): string {
+  return `${(bytes / 1024 / 1024).toFixed(1)} MB`;
+}
 
 /** Office/PDF 只读预览：引擎未安装时先问用户是否下载，确认后装到 ~/.paw/office/ 再预览 */
 function OfficePreview({ file }: { file: PreviewFile }) {
   const path = file.path || '';
   const [url, setUrl] = useState('');
   const [error, setError] = useState('');
+  const [fileMissing, setFileMissing] = useState(false);
+  const [copyHint, setCopyHint] = useState('');
   const [loading, setLoading] = useState(true);
   const [askDownload, setAskDownload] = useState(false);
   const [showDownload, setShowDownload] = useState(false);
   const [downloading, setDownloading] = useState(false);
+  const [progress, setProgress] = useState<OfficeDownloadProgress | null>(null);
   const [attempt, setAttempt] = useState(0);
   const downloadingRef = useRef(false);
   const mountedRef = useRef(true);
-  useEffect(() => () => { mountedRef.current = false; }, []);
+  const copyTimerRef = useRef<number | null>(null);
+  useEffect(() => () => {
+    mountedRef.current = false;
+    if (copyTimerRef.current !== null) window.clearTimeout(copyTimerRef.current);
+  }, []);
+
+  // 下载期间轮询服务端字节统计；不复用 /api/office/status（它会探测/启动引擎）。
+  useEffect(() => {
+    if (!downloading) return;
+    let cancelled = false;
+    const poll = () => {
+      void getOfficeDownloadProgress().then((p) => {
+        if (!cancelled && mountedRef.current) setProgress(p);
+      });
+    };
+    poll();
+    const timer = window.setInterval(poll, 500);
+    return () => { cancelled = true; window.clearInterval(timer); };
+  }, [downloading]);
 
   useEffect(() => {
     if (!path) { setLoading(false); return; }
@@ -65,12 +89,14 @@ function OfficePreview({ file }: { file: PreviewFile }) {
     // 下载成功时通过 attempt+1 触发预览，下载失败时保留报错与重试按钮而不再次自动弹窗。
     if (downloadingRef.current) return;
     let cancelled = false;
-    setUrl(''); setError(''); setAskDownload(false); setShowDownload(false); setLoading(true);
+    setUrl(''); setError(''); setFileMissing(false); setAskDownload(false); setShowDownload(false); setLoading(true);
     void getOfficePreview(path).then((d) => {
       if (!cancelled) setUrl(d.url);
     }).catch((e: unknown) => {
       if (cancelled) return;
-      if (e instanceof OfficeError && e.code === 'OFFICE_ENGINE_MISSING') {
+      if (e instanceof OfficeError && e.code === 'OFFICE_FILE_NOT_FOUND') {
+        setFileMissing(true);
+      } else if (e instanceof OfficeError && e.code === 'OFFICE_ENGINE_MISSING') {
         setAskDownload(true);
         setShowDownload(true);
       } else {
@@ -84,6 +110,7 @@ function OfficePreview({ file }: { file: PreviewFile }) {
     setAskDownload(false);
     setError(''); setUrl('');
     downloadingRef.current = true;
+    setProgress(null);
     setDownloading(true);
     void downloadOfficeEngine().then(() => {
       downloadingRef.current = false;
@@ -100,15 +127,22 @@ function OfficePreview({ file }: { file: PreviewFile }) {
   };
 
   const copyPath = () => {
+    const finish = (ok: boolean) => {
+      if (!mountedRef.current) return;
+      setCopyHint(ok ? '已复制' : '复制失败');
+      if (copyTimerRef.current !== null) window.clearTimeout(copyTimerRef.current);
+      copyTimerRef.current = window.setTimeout(() => setCopyHint(''), 1800);
+    };
     const fallback = () => {
       const ta = document.createElement('textarea');
       ta.value = path;
       document.body.appendChild(ta);
       ta.select();
-      document.execCommand('copy');
+      const ok = document.execCommand('copy');
       document.body.removeChild(ta);
+      finish(ok);
     };
-    if (navigator.clipboard) void navigator.clipboard.writeText(path).catch(fallback);
+    if (navigator.clipboard) void navigator.clipboard.writeText(path).then(() => finish(true)).catch(fallback);
     else fallback();
   };
 
@@ -127,16 +161,44 @@ function OfficePreview({ file }: { file: PreviewFile }) {
 
   let content: ReactNode;
   if (!path) {
-    content = <div className="afp-office-fallback"><div className="afp-office-msg">原始文件不存在或已被移动</div></div>;
+    content = <div className="afp-office-missing">
+      <div className="afp-office-missing-icon"><FileX size={26} strokeWidth={1.5} /></div>
+      <div className="afp-office-missing-title">文件不存在或已被移动</div>
+      <div className="afp-office-missing-desc">这个附件没有可预览的本地文件。</div>
+    </div>;
   } else if (downloading) {
-    content = <div className="afp-office-fallback"><div className="afp-office-msg">正在下载 Office 预览引擎（约 230MB），请稍候…</div></div>;
+    const pct = progress?.total ? Math.min(100, Math.round((progress.downloaded / progress.total) * 100)) : null;
+    const downloadedDone = !!progress && !progress.downloading && progress.downloaded > 0;
+    content = <div className="afp-office-fallback">
+      <div className="afp-office-msg">
+        {downloadedDone ? '引擎下载完成，正在启动预览…'
+          : pct !== null ? `正在下载 Office 预览引擎 ${pct}%`
+          : '正在下载 Office 预览引擎…'}
+      </div>
+      {pct !== null && <div className="afp-office-progress"><div className="afp-office-progress-fill" style={{ width: `${pct}%` }} /></div>}
+      <div className="afp-office-path">
+        {progress?.downloaded ? `${formatMb(progress.downloaded)}${progress.total ? ` / ${formatMb(progress.total)}` : ''}` : '准备中…'}
+      </div>
+    </div>;
+  } else if (fileMissing) {
+    content = <div className="afp-office-missing">
+      <div className="afp-office-missing-icon"><FileX size={26} strokeWidth={1.5} /></div>
+      <div className="afp-office-missing-title">文件不存在或已被移动</div>
+      <div className="afp-office-missing-desc">找不到这个路径下的文件，可能已被删除、重命名或移到别处。</div>
+      <div className="afp-office-missing-path" title={path}>{path}</div>
+      <button className={'afp-office-copy' + (copyHint ? ' copied' : '')} onClick={copyPath}>
+        {copyHint === '已复制' ? <Check size={12} /> : <Copy size={12} />} {copyHint || '复制路径'}
+      </button>
+    </div>;
   } else if (error) {
     content = <div className="afp-office-fallback">
       <div className="afp-office-msg">无法启动 Office 预览服务</div>
       <div className="afp-office-path">{error}</div>
       {showDownload && <button className="afp-office-open" onClick={() => setAskDownload(true)}><Download size={12} /> 下载引擎</button>}
       {reveal && <button className="afp-office-open" onClick={() => reveal(path)}><ExternalLink size={12} /> 在访达中显示</button>}
-      <button className="afp-office-copy" onClick={copyPath}><Copy size={12} /> 复制路径</button>
+      <button className={'afp-office-copy' + (copyHint ? ' copied' : '')} onClick={copyPath}>
+        {copyHint === '已复制' ? <Check size={12} /> : <Copy size={12} />} {copyHint || '复制路径'}
+      </button>
       <div className="afp-office-path">{path}</div>
     </div>;
   } else if (loading || !url) {

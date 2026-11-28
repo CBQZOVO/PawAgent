@@ -7,7 +7,7 @@ import { chmod, mkdtemp, readFile, rm, stat, writeFile } from 'node:fs/promises'
 import { createServer } from 'node:http';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
-import { buildPreviewUrl, downloadOfficeBinary, getOfficeStatus, installOfficeEngine, resolveOfficeBinary } from '../src/office-engine.js';
+import { buildPreviewUrl, downloadOfficeBinary, getOfficeDownloadProgress, getOfficeStatus, installOfficeEngine, resolveOfficeBinary } from '../src/office-engine.js';
 
 let pass = 0;
 let total = 0;
@@ -274,6 +274,48 @@ try {
       assert.deepEqual(s1, s2);
     } finally {
       await new Promise<void>((r) => dlServer.close(() => r()));
+    }
+  });
+
+  await test('下载进度：流式累计字节数，完成后 downloading=false 且对齐 Content-Length', async () => {
+    const chunk1 = Buffer.from('#!/bin/sh\n');
+    const chunk2 = Buffer.from('echo ok\n');
+    const body = Buffer.concat([chunk1, chunk2]);
+    let sendRest!: () => void;
+    const gate = new Promise<void>((r) => { sendRest = r; });
+    const server = createServer((_req, res) => {
+      res.writeHead(200, {
+        'Content-Type': 'application/octet-stream',
+        'Content-Length': String(body.length),
+      });
+      res.write(chunk1);
+      void gate.then(() => res.end(chunk2));
+    });
+    await new Promise<void>((r) => server.listen(0, '127.0.0.1', r));
+    const addr = server.address();
+    if (!addr || typeof addr === 'string') throw new Error('no addr');
+    let pending: Promise<string> | null = null;
+    try {
+      const dest = path.join(root, 'progress', 'editor_sdk');
+      pending = downloadOfficeBinary(dest, `http://127.0.0.1:${addr.port}/editor_sdk`);
+      let mid = getOfficeDownloadProgress();
+      for (let i = 0; i < 80 && (!mid.downloading || mid.downloaded < chunk1.length); i++) {
+        await new Promise((r) => setTimeout(r, 25));
+        mid = getOfficeDownloadProgress();
+      }
+      assert.equal(mid.downloading, true);
+      assert.equal(mid.total, body.length);
+      assert.ok(mid.downloaded >= chunk1.length, `中间进度未累计：${mid.downloaded}`);
+      sendRest();
+      await pending;
+      const done = getOfficeDownloadProgress();
+      assert.equal(done.downloading, false);
+      assert.equal(done.downloaded, body.length);
+      assert.equal(done.total, body.length);
+    } finally {
+      sendRest();
+      await pending?.catch(() => undefined);
+      await new Promise<void>((r) => server.close(() => r()));
     }
   });
 
