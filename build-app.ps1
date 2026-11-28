@@ -10,7 +10,7 @@
 # - asar 禁用（node-pty 原生模块塞不进 asar）；
 # - 网关配置不进包：运行时从 ~/.paw/gateway-config.json 读；
 # - 内置 node.exe：不依赖用户 PATH，也不用 Electron 的 execPath；
-# - Office 引擎（editor_sdk.exe）本地缺失时自动从 PAW_OFFICE_URL 下载（失败只警告不阻断）。
+# - Office 引擎不进包：首次打开文档时询问用户，确认后下载到 ~/.paw/office/。
 $ErrorActionPreference = 'Stop'
 # 原生命令（pnpm/tsc）退出码非 0 时直接中断：不设这个，pnpm build 失败会拿着旧 dist 继续打包
 $PSNativeCommandUseErrorActionPreference = $true
@@ -59,30 +59,6 @@ Log "组装 staging ..."
 if (Test-Path $Stage) { Remove-Item -Recurse -Force $Stage }
 node desktop/scripts/stage-app.mjs --root $ROOT --stage $Stage --deploy $Deploy
 if ($LASTEXITCODE -ne 0) { Write-Error "✗ staging 失败" }
-
-# ===== 3.5 Office 引擎（editor_sdk.exe，~225MB）=====
-# 仓库 office/ 里没有就尝试从 PAW_OFFICE_URL 下载；下载失败只警告不阻断
-# （运行期首次预览也可按需下载，不影响其它功能）。
-$OfficeBin = Join-Path $ROOT "office\editor_sdk.exe"
-if (-not (Test-Path $OfficeBin)) {
-    $OfficeUrl = if ($env:PAW_OFFICE_URL) { $env:PAW_OFFICE_URL } else { "https://igo-data.oss-cn-hangzhou.aliyuncs.com/editor_sdk.exe" }
-    Log "本地未找到 office/editor_sdk.exe，正在从 $OfficeUrl 下载 ..."
-    New-Item -ItemType Directory -Force -Path (Split-Path $OfficeBin) | Out-Null
-    $ProgressPreference = 'SilentlyContinue'
-    try {
-        Invoke-WebRequest -Uri $OfficeUrl -OutFile "$OfficeBin.part" -ErrorAction Stop
-        Move-Item -Force "$OfficeBin.part" $OfficeBin
-        Log "已下载 Office 引擎：$OfficeBin"
-    } catch {
-        Write-Host "⚠ 下载 Office 引擎失败，跳过（打包继续，运行期 Office 预览可按需下载）" -ForegroundColor Yellow
-        Remove-Item "$OfficeBin.part" -Force -ErrorAction SilentlyContinue
-    }
-}
-if (Test-Path $OfficeBin) {
-    New-Item -ItemType Directory -Force -Path "$Stage\office" | Out-Null
-    Copy-Item $OfficeBin "$Stage\office\editor_sdk.exe"
-    Log "已复制 Office 引擎：$Stage\office\editor_sdk.exe"
-}
 
 # 内置 node.exe
 New-Item -ItemType Directory -Force -Path "$Stage\runtime" | Out-Null

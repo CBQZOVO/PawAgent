@@ -11,6 +11,7 @@
 #   tsx 依赖 esbuild/zod 等传递依赖，pnpm 虚拟 store + 打包极易缺模块，编译成纯 JS 一了百了。
 # - asar 必须禁用：node-pty 是原生模块，塞进 asar 加载不了。
 # - 网关配置不进包：运行时 server 从 ~/.paw/gateway-config.json 读（没配置会显示页面让填，不直接退出）。
+# - Office 引擎不进包：首次打开文档时询问用户，确认后下载到 ~/.paw/office/。
 # - 内置 node：server 必须有个 node 跑 JS，不能依赖用户 PATH，也不能用 Electron 的 execPath。
 set -euo pipefail
 
@@ -53,7 +54,7 @@ pnpm --filter @paw/server deploy "$DEPLOY" --prod=false >/dev/null
 # ===== 3. 组装 staging（最终会原样塞进 .app/Contents/Resources/app）=====
 log "组装 staging ..."
 rm -rf "$STAGE" && mkdir -p "$STAGE"
-VERSION="$VERSION" APP_NAME="$APP_NAME" ROOT="$ROOT" STAGE="$STAGE" DEPLOY="$DEPLOY" PAW_SKIP_OFFICE="${PAW_SKIP_OFFICE:-0}" python3 - <<'PY'
+VERSION="$VERSION" APP_NAME="$APP_NAME" ROOT="$ROOT" STAGE="$STAGE" DEPLOY="$DEPLOY" python3 - <<'PY'
 import json, os, shutil, pathlib
 root, stage, deploy = (pathlib.Path(os.environ[k]) for k in ('ROOT', 'STAGE', 'DEPLOY'))
 version, app = os.environ['VERSION'], os.environ['APP_NAME']
@@ -110,34 +111,6 @@ shutil.copytree(pathlib.Path(root) / 'kernel' / 'dist', stage / 'kernel' / 'dist
 # 前端
 shutil.copytree(pathlib.Path(root) / 'web' / 'dist', stage / 'web' / 'dist')
 PY
-
-# 本地 Office 预览引擎 editor_sdk（~230MB）。
-# 若仓库 office/editor_sdk 不存在或为空，则打包前自动从 PAW_OFFICE_URL 下载；
-# 下载失败或 PAW_SKIP_OFFICE=1 都只警告，不阻断打包（运行期也可按需自动下载）。
-PAW_OFFICE_URL="${PAW_OFFICE_URL:-https://igo-data.oss-cn-hangzhou.aliyuncs.com/editor_sdk}"
-if [ "${PAW_SKIP_OFFICE:-0}" = "1" ]; then
-  log "跳过 Office 引擎（PAW_SKIP_OFFICE=1）"
-else
-  OFFICE_BIN="$ROOT/office/editor_sdk"
-  if [ ! -s "$OFFICE_BIN" ]; then
-    log "本地未找到 office/editor_sdk，正在从 ${PAW_OFFICE_URL} 下载 ..."
-    mkdir -p "$ROOT/office"
-    if curl -fL --progress-bar "$PAW_OFFICE_URL" -o "${OFFICE_BIN}.part" && [ -s "${OFFICE_BIN}.part" ]; then
-      chmod 755 "${OFFICE_BIN}.part"
-      mv "${OFFICE_BIN}.part" "$OFFICE_BIN"
-      log "已下载 Office 引擎：${OFFICE_BIN}"
-    else
-      rm -f "${OFFICE_BIN}.part"
-      echo "⚠ 下载 Office 引擎失败，跳过（打包继续，运行时仍可按需下载）" >&2
-    fi
-  fi
-  if [ -s "$OFFICE_BIN" ]; then
-    mkdir -p "$STAGE/office"
-    cp "$OFFICE_BIN" "$STAGE/office/editor_sdk"
-    chmod 755 "$STAGE/office/editor_sdk"
-    log "已复制 Office 引擎：$STAGE/office/editor_sdk"
-  fi
-fi
 
 # 内置 node
 mkdir -p "$STAGE/runtime"

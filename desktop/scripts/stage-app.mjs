@@ -7,7 +7,7 @@
 //   Windows 上直接复制成真实文件（不走 junction/symlink），electron-packager 复制时
 //   不依赖任何链接语义，最稳；
 // - 网关配置、用户数据不进包（运行时从 ~/.paw 读）；
-// - Office 引擎由各平台打包脚本按需下载并复制到 stage/office/。
+// - Office 引擎不进包：运行时由用户确认后下载到 ~/.paw/office/。
 //
 // 用法：node desktop/scripts/stage-app.mjs --root <repo根> --stage <输出目录> --deploy <pnpm deploy目录>
 import { cpSync, existsSync, mkdirSync, readFileSync, readdirSync, statSync, writeFileSync } from 'node:fs';

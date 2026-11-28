@@ -119,7 +119,7 @@ model: inherit
 | `~/.paw/persona/` | 可选个人人设与长期记忆文件（`IDENTITY.md` / `SOUL.md` / `USER.md` / `MEMORY.md`） |
 | `~/.paw/connections.json` & `secrets.json` | 系统连接定义与独立密钥文件（`0600` 权限，密钥永不进模型上下文） |
 | `~/.paw/search-config.json` & `search-key.txt` | 内置 `web_search` 渠道（DeepSeek / DuckDuckGo）与密钥 |
-| `~/.paw/office/editor_sdk` | 本地 Office 预览引擎（若仓库/包内缺失，首次预览或打包时按需从 `PAW_OFFICE_URL` 下载） |
+| `~/.paw/office/editor_sdk` | 本地 Office 预览引擎（不随安装包分发；首次打开文档时询问用户，确认后从 `PAW_OFFICE_URL` 下载到这里） |
 
 ### 环境变量
 
@@ -133,4 +133,4 @@ model: inherit
 | `PAW_SKILLS_DIR` | 覆盖默认技能目录 `~/.paw/skill`。 |
 | `PAW_MAX_ROUNDS` | 覆盖主循环最大工具轮次（默认 `200`，最低 `4`）。 |
 | `SUBAGENT_TIMEOUT_MS` | 覆盖单个子代理超时毫秒数（默认 `1800000`，即 30 分钟）。 |
-| `PAW_OFFICE_URL` / `PAW_OFFICE_BIN` | 覆盖 Office 预览引擎下载地址或本地二进制路径；设 `PAW_OFFICE_AUTO_DOWNLOAD=0` 可关闭运行时自动下载。 |
+| `PAW_OFFICE_URL` / `PAW_OFFICE_BIN` | 覆盖 Office 预览引擎下载地址或本地二进制路径（仅用于自定义/测试；默认下载到 `~/.paw/office/`）。 |

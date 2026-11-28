@@ -76,7 +76,7 @@ import { runTask, startScheduler } from './scheduler.js';
 import { loadSearchConfig, saveSearchProvider, type SearchProviderName } from './tools/web-search.js';
 import { DATA_DIR } from './paths.js';
 import { notifyDone } from './notify.js';
-import { buildPreviewUrl, getOfficeStatus } from './office-engine.js';
+import { buildPreviewUrl, getOfficeStatus, installOfficeEngine } from './office-engine.js';
 
 const DEFAULT_GATEWAY_URL = 'https://api.inspurai.cc';
 // 网关配置（GATEWAY_URL / GATEWAY_KEY）统一存于 ~/.paw/gateway-config.json（0600 权限）
@@ -268,10 +268,21 @@ app.post('/api/fs/stat', async (c) => {
   return c.json({ items });
 });
 // ---------------------------------------------------------------- 本地 Office 预览（腾讯文档 editor_sdk）
-// 懒启动；二进制缺失 / 启动失败返回明确错误，不影响 Paw 其余功能。
+// 懒启动；引擎不随包分发，缺失时只报 needsDownload，由用户确认后再下载。
 app.get('/api/office/status', async (c) => {
   const s = await getOfficeStatus();
-  return c.json({ available: s.available, port: s.port });
+  return c.json({
+    available: s.available,
+    port: s.port,
+    needsDownload: !!s.needsDownload,
+    ...(s.error ? { error: s.error } : {}),
+  });
+});
+// 前端询问用户后显式调用：下载引擎到 ~/.paw/office/ 并启动
+app.post('/api/office/download', async (c) => {
+  const s = await installOfficeEngine();
+  if (!s.available) return c.json({ error: s.error || 'Office 引擎安装失败', port: s.port }, 500);
+  return c.json({ available: true, port: s.port });
 });
 app.get('/api/office/preview', async (c) => {
   const raw = c.req.query('path')?.trim();
@@ -299,7 +310,11 @@ app.get('/api/office/preview', async (c) => {
   }
   const status = await getOfficeStatus();
   if (!status.available) {
-    return c.json({ error: status.error || 'Office 引擎不可用', port: status.port }, 503);
+    return c.json({
+      error: status.error || 'Office 引擎不可用',
+      code: status.needsDownload ? 'OFFICE_ENGINE_MISSING' : 'OFFICE_ENGINE_UNAVAILABLE',
+      port: status.port,
+    }, 503);
   }
   return c.json({ url });
 });

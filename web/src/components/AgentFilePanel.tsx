@@ -1,10 +1,12 @@
-import { useEffect, useMemo, useState } from 'react';
-import { ChevronRight, Copy, ExternalLink, FileText, Folder, RefreshCw, X } from 'lucide-react';
+import { useEffect, useMemo, useRef, useState, type ReactNode } from 'react';
+import { createPortal } from 'react-dom';
+import { ChevronRight, Copy, Download, ExternalLink, FileText, Folder, RefreshCw, X } from 'lucide-react';
 import { messageTools, type Attachment, type ViewMessage } from '@paw/shared';
-import { getFsFile, getFsTree, getOfficePreview, type FsEntry, type FsFile } from '../api/client';
+import { downloadOfficeEngine, getFsFile, getFsTree, getOfficePreview, OfficeError, type FsEntry, type FsFile } from '../api/client';
 import { inlineMediaSrc } from '../lib/attachments';
 import { extractMessageDeliverables } from '../lib/deliverables';
 import { extOf, fileBadgeStyle, isRawPreviewable, MONACO_LANG } from '../lib/file-preview';
+import ConfirmDialog from './ConfirmDialog';
 import MarkdownPreview from './MarkdownPreview';
 import CodeEditor from './CodeEditor';
 
@@ -43,24 +45,59 @@ function isOfficeExt(ext: string): boolean {
   return OFFICE_EXT.has(ext.toLowerCase());
 }
 
-/** Office/PDF 只读预览：统一走腾讯文档引擎，没有路径或失败时明确报错 */
+/** Office/PDF 只读预览：引擎未安装时先问用户是否下载，确认后装到 ~/.paw/office/ 再预览 */
 function OfficePreview({ file }: { file: PreviewFile }) {
   const path = file.path || '';
   const [url, setUrl] = useState('');
   const [error, setError] = useState('');
   const [loading, setLoading] = useState(true);
+  const [askDownload, setAskDownload] = useState(false);
+  const [showDownload, setShowDownload] = useState(false);
+  const [downloading, setDownloading] = useState(false);
+  const [attempt, setAttempt] = useState(0);
+  const downloadingRef = useRef(false);
+  const mountedRef = useRef(true);
+  useEffect(() => () => { mountedRef.current = false; }, []);
 
   useEffect(() => {
     if (!path) { setLoading(false); return; }
+    // 下载进行中切标签页时不重发预览，避免在下载完成前重复弹出确认框；
+    // 下载成功时通过 attempt+1 触发预览，下载失败时保留报错与重试按钮而不再次自动弹窗。
+    if (downloadingRef.current) return;
     let cancelled = false;
-    setUrl(''); setError(''); setLoading(true);
+    setUrl(''); setError(''); setAskDownload(false); setShowDownload(false); setLoading(true);
     void getOfficePreview(path).then((d) => {
       if (!cancelled) setUrl(d.url);
     }).catch((e: unknown) => {
-      if (!cancelled) setError(e instanceof Error ? e.message : '预览加载失败');
+      if (cancelled) return;
+      if (e instanceof OfficeError && e.code === 'OFFICE_ENGINE_MISSING') {
+        setAskDownload(true);
+        setShowDownload(true);
+      } else {
+        setError(e instanceof Error ? e.message : '预览加载失败');
+      }
     }).finally(() => { if (!cancelled) setLoading(false); });
     return () => { cancelled = true; };
-  }, [path]);
+  }, [path, attempt]);
+
+  const install = () => {
+    setAskDownload(false);
+    setError(''); setUrl('');
+    downloadingRef.current = true;
+    setDownloading(true);
+    void downloadOfficeEngine().then(() => {
+      downloadingRef.current = false;
+      if (!mountedRef.current) return;
+      setDownloading(false);
+      setAttempt((v) => v + 1);
+    }).catch((e: unknown) => {
+      downloadingRef.current = false;
+      if (!mountedRef.current) return;
+      setDownloading(false);
+      setError(e instanceof Error ? e.message : '引擎下载失败');
+      setShowDownload(true);
+    });
+  };
 
   const copyPath = () => {
     const fallback = () => {
@@ -76,19 +113,40 @@ function OfficePreview({ file }: { file: PreviewFile }) {
   };
 
   const reveal = (window as unknown as { pawDesktop?: { reveal?: (p: string) => void } }).pawDesktop?.reveal;
+  const prompt = askDownload ? createPortal(
+    <ConfirmDialog
+      title="下载 Office 预览引擎？"
+      body="预览 Word / Excel / PPT / PDF 需要腾讯文档本地引擎（约 230MB）。下载后会保存到 ~/.paw/office/，只有第一次需要。"
+      confirmText="下载并预览"
+      cancelText="暂不下载"
+      onCancel={() => { setAskDownload(false); setError('已取消下载，文档暂不能预览。'); }}
+      onConfirm={install}
+    />,
+    document.body,
+  ) : null;
 
-  if (!path) return <div className="afp-office-fallback"><div className="afp-office-msg">原始文件不存在或已被移动</div></div>;
-  if (error) return <div className="afp-office-fallback">
-    <div className="afp-office-msg">无法启动 Office 预览服务</div>
-    <div className="afp-office-path">{error}</div>
-    {reveal && <button className="afp-office-open" onClick={() => reveal(path)}><ExternalLink size={12} /> 在访达中显示</button>}
-    <button className="afp-office-copy" onClick={copyPath}><Copy size={12} /> 复制路径</button>
-    <div className="afp-office-path">{path}</div>
-  </div>;
-  if (loading || !url) return <div className="afp-office-fallback"><div className="afp-office-msg">正在加载 Office 预览…</div></div>;
-  return <iframe className="afp-office-frame" src={url} title={file.name}
-    allow="clipboard-read; clipboard-write; fullscreen"
-    onError={() => setError('预览页面加载失败')} />;
+  let content: ReactNode;
+  if (!path) {
+    content = <div className="afp-office-fallback"><div className="afp-office-msg">原始文件不存在或已被移动</div></div>;
+  } else if (downloading) {
+    content = <div className="afp-office-fallback"><div className="afp-office-msg">正在下载 Office 预览引擎（约 230MB），请稍候…</div></div>;
+  } else if (error) {
+    content = <div className="afp-office-fallback">
+      <div className="afp-office-msg">无法启动 Office 预览服务</div>
+      <div className="afp-office-path">{error}</div>
+      {showDownload && <button className="afp-office-open" onClick={() => setAskDownload(true)}><Download size={12} /> 下载引擎</button>}
+      {reveal && <button className="afp-office-open" onClick={() => reveal(path)}><ExternalLink size={12} /> 在访达中显示</button>}
+      <button className="afp-office-copy" onClick={copyPath}><Copy size={12} /> 复制路径</button>
+      <div className="afp-office-path">{path}</div>
+    </div>;
+  } else if (loading || !url) {
+    content = <div className="afp-office-fallback"><div className="afp-office-msg">正在加载 Office 预览…</div></div>;
+  } else {
+    content = <iframe className="afp-office-frame" src={url} title={file.name}
+      allow="clipboard-read; clipboard-write; fullscreen"
+      onError={() => setError('预览页面加载失败')} />;
+  }
+  return <>{prompt}{content}</>;
 }
 
 /** 文件夹预览：单层目录列表（复用 /api/fs/tree），点子文件/子文件夹在面板里继续打开 */

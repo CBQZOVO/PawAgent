@@ -1,8 +1,9 @@
-// 本地 Office 预览引擎：spawn / 复用本地 editor_sdk，按需自动下载并生成预览 URL。
+// 本地 Office 预览引擎：spawn / 复用腾讯文档 editor_sdk，生成预览 URL。
 //
 // 设计取舍：
+// - 引擎不随安装包分发，固定放在 ~/.paw/office/；
 // - 懒启动（首次 /api/office/* 才 spawn），不拖慢 Paw 启动；
-// - 二进制缺失时，非显式覆盖模式下可自动从 PAW_OFFICE_URL 下载到 ~/.paw/office/editor_sdk；
+// - 二进制缺失只上报 needsDownload，由前端询问用户后走 /api/office/download 显式下载；
 // - 下载或启动失败只返回明确错误，不抛异常、不阻塞主流程。
 import { spawn, type ChildProcess } from 'node:child_process';
 import { createHash } from 'node:crypto';
@@ -12,9 +13,6 @@ import os from 'node:os';
 import path from 'node:path';
 import { Readable } from 'node:stream';
 import { pipeline } from 'node:stream/promises';
-import { fileURLToPath } from 'node:url';
-
-const HERE = path.dirname(fileURLToPath(import.meta.url));
 
 export const DEFAULT_PORT = 39177;
 export const DEFAULT_OFFICE_DOWNLOAD_URL = 'https://igo-data.oss-cn-hangzhou.aliyuncs.com/editor_sdk';
@@ -62,6 +60,8 @@ const URL_CONFIG: Record<DocType, {
 export type OfficeStatus = {
   available: boolean;
   port: number;
+  /** 二进制未安装：需用户确认后才下载，绝不自动下载 */
+  needsDownload?: boolean;
   error?: string;
   binary?: string;
 };
@@ -97,12 +97,10 @@ function editorBinaryName(): string {
   return process.platform === 'win32' ? 'editor_sdk.exe' : 'editor_sdk';
 }
 
-/** 优先显式覆盖（测试/自定义）；其次仓库或打包目录 office/editor_sdk[.exe]；最后 ~/.paw/office/。 */
+/** 优先显式覆盖（测试/自定义）；引擎不随包分发，固定放 ~/.paw/office/。 */
 export function resolveOfficeBinary(): string {
   const explicit = process.env.PAW_OFFICE_BIN?.trim();
   if (explicit) return explicit;
-  const packaged = path.resolve(HERE, '..', '..', 'office', editorBinaryName());
-  if (process.env.PAW_OFFICE_IGNORE_PACKAGED !== '1' && hasNonEmptyFile(packaged)) return packaged;
   return path.join(officeDataDir(), 'office', editorBinaryName());
 }
 
@@ -110,19 +108,33 @@ export function resolveOfficeBinary(): string {
 export async function downloadOfficeBinary(
   dest: string,
   url: string = officeDownloadUrl(),
+  timeoutMs: number = 10 * 60 * 1000,
 ): Promise<string> {
   await mkdir(path.dirname(dest), { recursive: true });
   const part = `${dest}.${process.pid}.part`;
   console.log(`[office] 正在下载引擎：${url} → ${dest}`);
   try {
-    const resp = await fetch(url, { redirect: 'follow' });
+    const resp = await fetch(url, { redirect: 'follow', signal: AbortSignal.timeout(timeoutMs) });
     if (!resp.ok || !resp.body) {
       throw new Error(`HTTP ${resp.status} ${resp.statusText}`);
     }
     const nodeStream = Readable.fromWeb(resp.body as unknown as import('node:stream/web').ReadableStream);
     await pipeline(nodeStream, createWriteStream(part));
-    await chmod(part, 0o755);
-    await rename(part, dest);
+    if (process.platform !== 'win32') await chmod(part, 0o755);
+    // Windows Defender 实时扫描刚写完的 230MB .part 时会短暂锁句柄，rename 遇 EPERM/EBUSY/EACCES 退避重试
+    for (let i = 0; ; i++) {
+      try {
+        await rename(part, dest);
+        break;
+      } catch (err) {
+        const code = (err as NodeJS.ErrnoException).code;
+        if (i < 5 && (code === 'EPERM' || code === 'EBUSY' || code === 'EACCES')) {
+          await new Promise((r) => setTimeout(r, 300 * (i + 1)));
+          continue;
+        }
+        throw err;
+      }
+    }
     console.log(`[office] 引擎下载完成：${dest}`);
     return dest;
   } catch (e) {
@@ -173,6 +185,7 @@ async function probeEngine(port: number): Promise<boolean> {
 
 let child: ChildProcess | null = null;
 let starting: Promise<OfficeStatus> | null = null;
+let installing: Promise<OfficeStatus> | null = null;
 let last: OfficeStatus = { available: false, port: DEFAULT_PORT };
 
 async function start(): Promise<OfficeStatus> {
@@ -183,20 +196,13 @@ async function start(): Promise<OfficeStatus> {
     return last;
   }
 
-  let binary = resolveOfficeBinary();
+  const binary = resolveOfficeBinary();
   if (!hasNonEmptyFile(binary)) {
-    const explicit = Boolean(process.env.PAW_OFFICE_BIN?.trim());
-    const autoDownload = process.env.PAW_OFFICE_AUTO_DOWNLOAD !== '0';
-    if (explicit || !autoDownload) {
-      last = { available: false, port, binary, error: `Office 引擎二进制不存在：${binary}` };
-      return last;
-    }
-    try {
-      binary = await downloadOfficeBinary(binary);
-    } catch (e) {
-      last = { available: false, port, binary, error: (e as Error).message };
-      return last;
-    }
+    last = {
+      available: false, port, binary, needsDownload: true,
+      error: `Office 引擎未安装：${binary}`,
+    };
+    return last;
   }
 
   const dataDir = officeDataDir();
@@ -242,7 +248,8 @@ async function start(): Promise<OfficeStatus> {
     last = { available: false, port, binary, error: `Office 引擎已退出（code=${code}, signal=${signal}）` };
   });
 
-  const deadline = Date.now() + 8000;
+  // Windows 首次运行刚落盘的 230MB .exe 常受 Defender 扫描拖慢，给 20s 上限（每 250ms 探测一次，就绪即返回）
+  const deadline = Date.now() + (process.platform === 'win32' ? 20_000 : 12_000);
   while (Date.now() < deadline && !last.error) {
     if (await probeEngine(port)) {
       last = { available: true, port, binary };
@@ -256,12 +263,7 @@ async function start(): Promise<OfficeStatus> {
     : { ...last, error: `Office 引擎启动超时（端口 ${port} 未就绪，详见 ${logFile}）` };
 }
 
-/**
- * 每次调用都先探测实际端口，再用缓存的启动承诺并发复用。
- * 不能因为 `last.available` 就直接返回：引擎可能被外部杀掉或自行退出，
- * 过期状态会让前端拿到一个打不开的 iframe。
- */
-export async function getOfficeStatus(): Promise<OfficeStatus> {
+async function probeOrStart(): Promise<OfficeStatus> {
   const port = officePort();
   if (await probeEngine(port)) {
     last = { available: true, port, binary: resolveOfficeBinary() };
@@ -269,4 +271,34 @@ export async function getOfficeStatus(): Promise<OfficeStatus> {
   }
   if (!starting) starting = start().finally(() => { starting = null; });
   return starting;
+}
+
+/**
+ * 每次调用都先探测实际端口，再用缓存的启动承诺并发复用。
+ * 若用户刚确认下载且正在拉取引擎，直接等待本次安装完成，不再误报 needsDownload 重复弹窗。
+ */
+export async function getOfficeStatus(): Promise<OfficeStatus> {
+  if (installing) return installing;
+  return probeOrStart();
+}
+
+/**
+ * 用户确认后才调用：下载到 ~/.paw/office/ 并启动。
+ * 并发请求共用同一次下载，避免重复拉 230MB；已安装时直接走正常启动流程。
+ */
+export function installOfficeEngine(): Promise<OfficeStatus> {
+  if (!installing) {
+    installing = (async () => {
+      const binary = resolveOfficeBinary();
+      if (!hasNonEmptyFile(binary)) {
+        try {
+          await downloadOfficeBinary(binary);
+        } catch (e) {
+          return { available: false, port: officePort(), binary, error: (e as Error).message };
+        }
+      }
+      return probeOrStart();
+    })().finally(() => { installing = null; });
+  }
+  return installing;
 }

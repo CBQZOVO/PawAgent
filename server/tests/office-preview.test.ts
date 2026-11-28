@@ -2,11 +2,12 @@
 // 运行：pnpm --filter @paw/server exec tsx tests/office-preview.test.ts
 import assert from 'node:assert/strict';
 import { createHash } from 'node:crypto';
+import { existsSync } from 'node:fs';
 import { chmod, mkdtemp, readFile, rm, stat, writeFile } from 'node:fs/promises';
 import { createServer } from 'node:http';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
-import { buildPreviewUrl, downloadOfficeBinary, getOfficeStatus, resolveOfficeBinary } from '../src/office-engine.js';
+import { buildPreviewUrl, downloadOfficeBinary, getOfficeStatus, installOfficeEngine, resolveOfficeBinary } from '../src/office-engine.js';
 
 let pass = 0;
 let total = 0;
@@ -22,6 +23,7 @@ const saved = {
   port: process.env.PAW_OFFICE_PORT,
   bin: process.env.PAW_OFFICE_BIN,
   data: process.env.PAW_DATA_DIR,
+  url: process.env.PAW_OFFICE_URL,
 };
 
 try {
@@ -106,7 +108,7 @@ try {
     assert.throws(() => buildPreviewUrl(path.join(root, 'notes.txt')), /不支持的 Office 文件类型/);
   });
 
-  await test('二进制缺失：返回不可用 + 明确错误（不抛异常）', async () => {
+  await test('二进制缺失：返回不可用 + needsDownload，不抛异常也不下载', async () => {
     const port = freePort();
     process.env.PAW_OFFICE_PORT = String(port);
     process.env.PAW_OFFICE_BIN = path.join(root, 'does-not-exist', 'editor_sdk');
@@ -114,7 +116,8 @@ try {
     const status = await getOfficeStatus();
     assert.equal(status.available, false);
     assert.equal(status.port, port);
-    assert.match(status.error || '', /二进制不存在/);
+    assert.equal(status.needsDownload, true);
+    assert.match(status.error || '', /未安装/);
     assert.equal(resolveOfficeBinary(), process.env.PAW_OFFICE_BIN);
   });
 
@@ -182,39 +185,94 @@ try {
       await new Promise<void>((r) => server.close(() => r()));
       const status = await getOfficeStatus();
       assert.equal(status.available, false, '失联后必须报告不可用，不能沿用旧缓存');
-      assert.match(status.error || '', /不存在|超时|退出|错误/);
+      assert.match(status.error || '', /未安装|不存在|超时|退出|错误/);
     } finally {
       if (server.listening) await new Promise<void>((r) => server.close(() => r()));
     }
   });
 
-  await test('运行时二进制缺失时：自动从 PAW_OFFICE_URL 下载到 PAW_DATA_DIR/office/editor_sdk', async () => {
+  await test('resolveOfficeBinary 固定指向 ~/.paw/office，不使用包内二进制', async () => {
+    delete process.env.PAW_OFFICE_BIN;
+    const dir = path.join(root, 'data-path');
+    process.env.PAW_DATA_DIR = dir;
+    const name = process.platform === 'win32' ? 'editor_sdk.exe' : 'editor_sdk';
+    assert.equal(resolveOfficeBinary(), path.join(dir, 'office', name));
+  });
+
+  await test('未确认时 getOfficeStatus 不下载、不落盘', async () => {
     const port = freePort();
-    const dlDir = path.join(root, 'data-autodl');
+    const dlDir = path.join(root, 'data-nodl');
+    delete process.env.PAW_OFFICE_BIN;
+    process.env.PAW_OFFICE_PORT = String(port);
+    process.env.PAW_DATA_DIR = dlDir;
+    process.env.PAW_OFFICE_URL = 'http://127.0.0.1:1/editor_sdk'; // 若被误下载必然失败并留下痕迹
+
+    const status = await getOfficeStatus();
+    assert.equal(status.available, false);
+    assert.equal(status.needsDownload, true);
+    assert.equal(existsSync(path.join(dlDir, 'office', 'editor_sdk')), false);
+  });
+
+  await test('用户确认后：installOfficeEngine 下载到 PAW_DATA_DIR/office/editor_sdk，重复调用不重下', async () => {
+    const port = freePort();
+    const dlDir = path.join(root, 'data-install');
+    let downloads = 0;
     const dlServer = createServer((_req, res) => {
+      downloads++;
       res.writeHead(200, { 'Content-Type': 'application/octet-stream' });
       res.end('#!/bin/sh\nexit 0\n');
     });
     await new Promise<void>((r) => dlServer.listen(0, '127.0.0.1', r));
     const addr = dlServer.address();
     if (!addr || typeof addr === 'string') throw new Error('no addr');
-    const prevUrl = process.env.PAW_OFFICE_URL;
-    const prevIgnore = process.env.PAW_OFFICE_IGNORE_PACKAGED;
     try {
       delete process.env.PAW_OFFICE_BIN;
       process.env.PAW_OFFICE_PORT = String(port);
       process.env.PAW_DATA_DIR = dlDir;
-      process.env.PAW_OFFICE_IGNORE_PACKAGED = '1';
       process.env.PAW_OFFICE_URL = `http://127.0.0.1:${addr.port}/editor_sdk`;
 
-      const status = await getOfficeStatus();
+      const status = await installOfficeEngine();
       assert.equal(status.available, false); // mock 脚本立刻退出
       const expectedBin = path.join(dlDir, 'office', 'editor_sdk');
       assert.equal(status.binary, expectedBin);
       assert.match(await readFile(expectedBin, 'utf-8'), /#!\/bin\/sh/);
+
+      await installOfficeEngine();
+      assert.equal(downloads, 1, '已安装时不应重复下载');
     } finally {
-      if (prevUrl === undefined) delete process.env.PAW_OFFICE_URL; else process.env.PAW_OFFICE_URL = prevUrl;
-      if (prevIgnore === undefined) delete process.env.PAW_OFFICE_IGNORE_PACKAGED; else process.env.PAW_OFFICE_IGNORE_PACKAGED = prevIgnore;
+      await new Promise<void>((r) => dlServer.close(() => r()));
+    }
+  });
+
+  await test('下载进行中并发调用 getOfficeStatus：复用同一次下载，不误报 needsDownload', async () => {
+    const port = freePort();
+    const dlDir = path.join(root, 'data-concurrent-dl');
+    let downloads = 0;
+    let release!: () => void;
+    const gate = new Promise<void>((r) => { release = r; });
+    const dlServer = createServer(async (_req, res) => {
+      downloads++;
+      await gate;
+      res.writeHead(200, { 'Content-Type': 'application/octet-stream' });
+      res.end('#!/bin/sh\nexit 0\n');
+    });
+    await new Promise<void>((r) => dlServer.listen(0, '127.0.0.1', r));
+    const addr = dlServer.address();
+    if (!addr || typeof addr === 'string') throw new Error('no addr');
+    try {
+      delete process.env.PAW_OFFICE_BIN;
+      process.env.PAW_OFFICE_PORT = String(port);
+      process.env.PAW_DATA_DIR = dlDir;
+      process.env.PAW_OFFICE_URL = `http://127.0.0.1:${addr.port}/editor_sdk`;
+
+      const pInstall = installOfficeEngine();
+      const pStatus = getOfficeStatus();
+      release();
+      const [s1, s2] = await Promise.all([pInstall, pStatus]);
+      assert.equal(downloads, 1, '并发只应下载一次');
+      assert.notEqual(s2.needsDownload, true, '下载中并发查询不应误报 needsDownload');
+      assert.deepEqual(s1, s2);
+    } finally {
       await new Promise<void>((r) => dlServer.close(() => r()));
     }
   });

@@ -606,7 +606,7 @@ export async function statFiles(paths: string[], root?: string | null): Promise<
 }
 
 // ===== 腾讯文档引擎：Office 文件预览 =====
-export interface OfficeStatus { available: boolean; port: number }
+export interface OfficeStatus { available: boolean; port: number; needsDownload?: boolean; error?: string }
 export async function getOfficeStatus(): Promise<OfficeStatus> {
   try {
     return await (await fetch('/api/office/status')).json();
@@ -614,14 +614,30 @@ export async function getOfficeStatus(): Promise<OfficeStatus> {
     return { available: false, port: 0 };
   }
 }
-export interface OfficePreview { url: string; error?: string }
+/** 带机器可读 code：OFFICE_ENGINE_MISSING 时前端才询问用户是否下载 */
+export class OfficeError extends Error {
+  code?: string;
+  constructor(message: string, code?: string) {
+    super(message);
+    this.name = 'OfficeError';
+    this.code = code;
+  }
+}
+export interface OfficePreview { url: string; error?: string; code?: string }
 /** path 用磁盘绝对路径；mode=readonly 打开只读预览 */
 export async function getOfficePreview(path: string, mode: 'readonly' | 'edit' = 'readonly'): Promise<OfficePreview> {
   const params = new URLSearchParams({ path, mode });
   const r = await fetch(`/api/office/preview?${params}`);
   const d = await r.json().catch(() => ({})) as OfficePreview;
+  if (!r.ok) throw new OfficeError(d.error || `HTTP ${r.status}`, d.code);
+  if (typeof d.url !== 'string' || !d.url) throw new OfficeError(d.error || '未返回预览地址', d.code);
+  return d;
+}
+/** 用户确认后下载引擎到 ~/.paw/office/ 并启动（服务端拒绝静默下载） */
+export async function downloadOfficeEngine(): Promise<OfficeStatus> {
+  const r = await fetch('/api/office/download', { method: 'POST' });
+  const d = await r.json().catch(() => ({})) as OfficeStatus;
   if (!r.ok) throw new Error(d.error || `HTTP ${r.status}`);
-  if (typeof d.url !== 'string' || !d.url) throw new Error(d.error || '未返回预览地址');
   return d;
 }
 
