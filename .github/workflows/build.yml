@@ -2,7 +2,7 @@
 # 支持在 GitHub Actions 页面点击「Run workflow」直接输入版本号一键构建并自动发 Release，
 # 也支持推 v* tag 自动触发。无需手动修改仓库里的 package.json 版本号。
 # 说明：
-# - macOS 走 build-app.sh（PAW_NO_INSTALL=1 跳过本机安装），用 hdiutil 打包带 Applications 快捷方式的 .dmg；
+# - macOS 走 build-app.sh（PAW_NO_INSTALL=1 跳过本机安装），用 hdiutil 打包带 Applications 快捷方式的 .dmg（ULMO/lzma 压缩）；
 # - Windows 走 build-app.ps1，用 Inno Setup（desktop/scripts/installer.iss）生成 Setup.exe 安装包；
 # - 产物未签名：Windows 首次运行会有 SmartScreen 提示，macOS 需右键 → 打开绕过 Gatekeeper。
 name: build-app
@@ -94,7 +94,7 @@ jobs:
           rm -rf "$DMG_STAGE" && mkdir -p "$DMG_STAGE"
           cp -R /tmp/paw-pack/Paw-darwin-arm64/Paw.app "$DMG_STAGE/"
           ln -s /Applications "$DMG_STAGE/Applications"
-          hdiutil create -volname "Paw" -srcfolder "$DMG_STAGE" -ov -format UDZO \
+          hdiutil create -volname "Paw" -srcfolder "$DMG_STAGE" -ov -format ULMO \
             "${{ matrix.archive-dir }}/Paw-${{ env.APP_VERSION }}-${{ matrix.target }}${{ matrix.ext }}"
         env:
           PAW_NO_INSTALL: '1'
