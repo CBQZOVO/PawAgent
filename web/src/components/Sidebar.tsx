@@ -175,15 +175,23 @@ export default function Sidebar({
     storeKey: ideMode ? 'paw-side-width-ide' : 'paw-side-width',
     defaultWidth: ideMode ? SIDE_IDE_WIDTH : SIDE_DEFAULT_WIDTH,
   });
+  const wsLoadSeqRef = useRef(0);
+  const lastAutoOpenedRootRef = useRef<string | null>(null);
   useEffect(() => {
-    const load = () => void getWorkspace().then(setWsInfo);
+    const load = () => {
+      const seq = ++wsLoadSeqRef.current;
+      void getWorkspace().then((info) => {
+        if (seq === wsLoadSeqRef.current) setWsInfo(info);
+      });
+    };
     load();
     window.addEventListener(WORKSPACE_CHANGED, load);
     return () => window.removeEventListener(WORKSPACE_CHANGED, load);
   }, []);
   useEffect(() => {
-    const root = wsInfo?.root;
-    if (!root) return;
+    const root = wsInfo?.root ?? null;
+    if (!root || root === lastAutoOpenedRootRef.current) return;
+    lastAutoOpenedRootRef.current = root;
     setWsOpen((p) => (p[root] ? p : { ...p, [root]: true }));
   }, [wsInfo?.root]);
 
@@ -323,8 +331,18 @@ export default function Sidebar({
   }
   const workspaceRoots = [...new Set([...(wsInfo?.workspaces || []), ...Object.keys(byWorkspace)])];
   const switchWorkspace = (ws: string) => {
-    void setWorkspace(ws);
-    setWsOpen((p) => ({ ...p, [ws]: !p[ws] }));
+    const willOpen = !wsOpen[ws];
+    setWsOpen((p) => ({ ...p, [ws]: willOpen }));
+    // 只有展开且尚未设为当前工作区时才切换，避免收起时被 WORKSPACE_CHANGED 弹回展开，
+    // 同时在当前帧乐观更新 wsInfo.root，消除点击展开后高亮延迟闪烁。
+    if (willOpen && wsInfo?.root !== ws) {
+      lastAutoOpenedRootRef.current = ws;
+      wsLoadSeqRef.current++;
+      setWsInfo((prev) => prev
+        ? { ...prev, root: ws, workspaces: prev.workspaces.includes(ws) ? prev.workspaces : [...prev.workspaces, ws] }
+        : { root: ws, workspaces: [ws], candidates: [] });
+      void setWorkspace(ws);
+    }
   };
   const wsShort = (p: string) => p.split(/[\\/]/).filter(Boolean).slice(-1)[0] || p;
   const renderSession = (s: Session, nested = false) => {

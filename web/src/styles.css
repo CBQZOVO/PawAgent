@@ -1178,7 +1178,7 @@ button { font-family: inherit; cursor: pointer; }
 .side-group-head { display: flex; align-items: center; gap: 7px; width: 100%; border: 0; background: none; color: var(--text-secondary); padding: 10px 12px 6px; font: inherit; font-size: 13.5px; cursor: pointer; text-align: left; }
 .side-group-head:hover { color: var(--text-regular); }
 .side-group-head .collapsed { transform: rotate(-90deg); }
-.task-sessions { padding-left: 0; }
+.task-sessions { padding-left: 0; overflow: visible; }
 
 /* 聊天页 + 右侧运行记录面板布局 */
 .chat-layout { display: flex; flex: 1; min-width: 0; min-height: 0; overflow: hidden; }
@@ -2329,8 +2329,8 @@ body.paw-resizing-v, body.paw-resizing-v * { cursor: row-resize !important; user
    标题必须按实际宽度留白，否则长名字会铺到按钮下面，把「+」盖住。 */
 .side-ws-row .side-group-head { padding-right: 74px; }
 .side-group-head { padding-right: 32px; }
-/* 子会话靠 padding-left 缩进，别被上面的统一 padding 抹平 */
-.session-item.nested { padding-left: 38px; }
+/* 子会话靠 padding-left 缩进，比工作区名称（11 + 15.5 + 7 + 15.5 + 7 = 56px）再多缩进 8px，形成清晰层级 */
+.session-item.nested { padding-left: 64px; }
 
 /* 分组标题（工具与自动化 / 工作区 / 最近任务）：小字号弱化层级，让内容成为主角 */
 .sidebar .side-label {
