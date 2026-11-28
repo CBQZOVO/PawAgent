@@ -1,9 +1,11 @@
-// 内置 web_search：deepseek / ddg 双 Provider，纯 fetch 零额外依赖。
+// 内置 web_search：deepseek / kimi / ddg 三 Provider，纯 fetch 零额外依赖。
 //
-// 配置优先级：环境变量 > ~/.paw/search-config.json > ~/.paw/search-key.txt > 默认(deepseek)
-//   SEARCH_PROVIDER=deepseek|ddg
-//   DEEPSEEK_SEARCH_KEY=sk-...
-import { readFile, writeFile } from 'node:fs/promises';
+// 配置优先级：环境变量 > ~/.paw/search-config.json > 网关 Key > 默认(deepseek)
+//   SEARCH_PROVIDER=deepseek|kimi|ddg
+//   DEEPSEEK_SEARCH_KEY=sk-...（或 ~/.paw/search-key.txt）
+//   KIMI_SEARCH_KEY=sk-...（或 MOONSHOT_API_KEY；缺省复用 api.moonshot.cn 网关 Key）
+import { chmod, mkdir, readFile, writeFile } from 'node:fs/promises';
+import path from 'node:path';
 import { LEGACY_DIRS, dataFile } from '../paths.js';
 
 // 搜索渠道选择与密钥均放 ~/.paw，重装不丢
@@ -11,17 +13,33 @@ const CONFIG_FILE = dataFile('search-config.json', LEGACY_DIRS);
 const FALLBACK_KEY_FILE = dataFile('search-key.txt');
 
 const DEEPSEEK_API = 'https://api.deepseek.com/v1/tools/search';
+const KIMI_API = 'https://api.moonshot.cn/v1/tools/search';
 const DDG_HTML = 'https://duckduckgo.com/html/?q=';
 const MAX_RESULTS = 10;
 const TIMEOUT_MS = 20000;
 const UA =
   'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36';
 
-export type SearchProviderName = 'deepseek' | 'ddg';
+export type SearchProviderName = 'deepseek' | 'kimi' | 'ddg';
 
 interface SearchConfig {
   provider: SearchProviderName;
   deepseekKey?: string;
+  kimiKey?: string;
+}
+
+/** 国内站 Key：已登录 Kimi 网关时直接复用，省一次手工配置 */
+async function kimiKeyFromGateway(): Promise<string | undefined> {
+  try {
+    const cfg = JSON.parse(await readFile(dataFile('gateway-config.json'), 'utf-8')) as {
+      GATEWAY_URL?: string; baseUrl?: string; GATEWAY_KEY?: string; apiKey?: string;
+    };
+    const base = String(cfg.GATEWAY_URL || cfg.baseUrl || '').toLowerCase();
+    if (base.includes('api.moonshot.cn')) return cfg.GATEWAY_KEY || cfg.apiKey || undefined;
+  } catch {
+    /* 没配置 Kimi 网关 */
+  }
+  return undefined;
 }
 
 /** 读配置：env > search-config.json > 默认 */
@@ -32,7 +50,8 @@ export async function loadSearchConfig(): Promise<SearchConfig> {
   } catch {
     /* 无配置文件用默认 */
   }
-  const provider = (process.env.SEARCH_PROVIDER || fileCfg.provider || 'deepseek') as SearchProviderName;
+  const raw = process.env.SEARCH_PROVIDER || fileCfg.provider || 'deepseek';
+  const provider: SearchProviderName = raw === 'kimi' ? 'kimi' : raw === 'ddg' ? 'ddg' : 'deepseek';
   let key = process.env.DEEPSEEK_SEARCH_KEY || fileCfg.deepseekKey;
   if (!key) {
     try {
@@ -41,19 +60,45 @@ export async function loadSearchConfig(): Promise<SearchConfig> {
       /* ddg 不需要 key */
     }
   }
-  return { provider: provider === 'ddg' ? 'ddg' : 'deepseek', deepseekKey: key };
+  const kimiKey = process.env.KIMI_SEARCH_KEY || process.env.MOONSHOT_API_KEY || fileCfg.kimiKey || await kimiKeyFromGateway();
+  return { provider, deepseekKey: key, kimiKey };
+}
+
+/** 读 search-config.json（不存在/损坏当空） */
+async function readRawSearchConfig(): Promise<Record<string, unknown>> {
+  try {
+    const raw = JSON.parse(await readFile(CONFIG_FILE, 'utf-8'));
+    return raw && typeof raw === 'object' && !Array.isArray(raw) ? raw as Record<string, unknown> : {};
+  } catch {
+    return {};
+  }
+}
+
+async function writeRawSearchConfig(cfg: Record<string, unknown>): Promise<void> {
+  await mkdir(path.dirname(CONFIG_FILE), { recursive: true });
+  await writeFile(CONFIG_FILE, JSON.stringify(cfg, null, 2) + '\n', { encoding: 'utf-8', mode: 0o600 });
+  await chmod(CONFIG_FILE, 0o600).catch(() => undefined);
 }
 
 /** 保存 provider 切换（写 search-config.json，供 /api/search-config 用） */
 export async function saveSearchProvider(provider: SearchProviderName): Promise<void> {
-  let cfg: Record<string, unknown> = {};
-  try {
-    cfg = JSON.parse(await readFile(CONFIG_FILE, 'utf-8'));
-  } catch {
-    /* ignore */
-  }
+  const cfg = await readRawSearchConfig();
   cfg.provider = provider;
-  await writeFile(CONFIG_FILE, JSON.stringify(cfg, null, 2) + '\n', 'utf-8');
+  await writeRawSearchConfig(cfg);
+}
+
+/** 保存搜索渠道 key：传空串即清除该渠道的 key */
+export async function saveSearchKeys(patch: { deepseekKey?: string; kimiKey?: string }): Promise<void> {
+  const cfg = await readRawSearchConfig();
+  if (patch.deepseekKey !== undefined) {
+    if (patch.deepseekKey) cfg.deepseekKey = patch.deepseekKey;
+    else delete cfg.deepseekKey;
+  }
+  if (patch.kimiKey !== undefined) {
+    if (patch.kimiKey) cfg.kimiKey = patch.kimiKey;
+    else delete cfg.kimiKey;
+  }
+  await writeRawSearchConfig(cfg);
 }
 
 // ---------- 域名过滤（抄 Mano passesDomainFilter）----------
@@ -98,6 +143,27 @@ async function searchDeepseek(query: string, allowed: string[], blocked: string[
     const url = it.url || '';
     if (!passesDomainFilter(url, allowed, blocked)) continue;
     out.push({ title: it.title || '', url, snippet: (it.summary || '').slice(0, 600), date: it.date || '' });
+  }
+  return out;
+}
+
+// ---------- Provider: Kimi 联网搜索 Basic ----------
+async function searchKimi(query: string, allowed: string[], blocked: string[], key: string, signal?: AbortSignal): Promise<SearchHit[]> {
+  if (!key) throw new Error('kimi provider 需要 KIMI_SEARCH_KEY（或 Kimi 网关 Key）');
+  const resp = await fetch(KIMI_API, {
+    method: 'POST',
+    headers: { Authorization: `Bearer ${key}`, 'Content-Type': 'application/json' },
+    // 服务端给 15s，比本地 20s 超时短，避免客户端先把请求掐断
+    body: JSON.stringify({ text_query: query, limit: MAX_RESULTS, timeout_seconds: 15, include_content: false }),
+    signal: signal ? AbortSignal.any([signal, AbortSignal.timeout(TIMEOUT_MS)]) : AbortSignal.timeout(TIMEOUT_MS),
+  });
+  if (!resp.ok) throw new Error(`Kimi search HTTP ${resp.status}: ${(await resp.text()).slice(0, 200)}`);
+  const data = (await resp.json()) as { search_results?: Array<Record<string, string>> };
+  const out: SearchHit[] = [];
+  for (const it of data.search_results || []) {
+    const url = it.url || '';
+    if (!passesDomainFilter(url, allowed, blocked)) continue;
+    out.push({ title: it.title || '', url, snippet: (it.snippet || '').slice(0, 600), date: it.date || '' });
   }
   return out;
 }
@@ -206,7 +272,9 @@ export async function webSearch(args: Record<string, unknown>, signal?: AbortSig
     results =
       cfg.provider === 'ddg'
         ? await searchDdg(query, allowed, blocked, signal)
-        : await searchDeepseek(query, allowed, blocked, cfg.deepseekKey || '', signal);
+        : cfg.provider === 'kimi'
+          ? await searchKimi(query, allowed, blocked, cfg.kimiKey || '', signal)
+          : await searchDeepseek(query, allowed, blocked, cfg.deepseekKey || '', signal);
   } catch (e) {
     error = `${cfg.provider} search failed: ${(e as Error).message.slice(0, 200)}`;
   }

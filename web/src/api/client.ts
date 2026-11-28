@@ -333,9 +333,9 @@ export async function getModels(): Promise<{ models: ModelInfo[]; default?: stri
   return r.json();
 }
 
-export type SearchProvider = 'deepseek' | 'ddg';
+export type SearchProvider = 'deepseek' | 'kimi' | 'ddg';
 
-export async function getSearchConfig(): Promise<{ provider: SearchProvider; hasDeepseekKey: boolean }> {
+export async function getSearchConfig(): Promise<{ provider: SearchProvider; hasDeepseekKey: boolean; hasKimiKey: boolean }> {
   const r = await fetch('/api/search-config');
   return r.json();
 }
@@ -350,6 +350,18 @@ export async function setSearchConfig(provider: SearchProvider): Promise<void> {
     const d = await r.json().catch(() => ({}));
     throw new Error(d.error || `HTTP ${r.status}`);
   }
+}
+
+/** 保存搜索渠道 key；传空串即清除。返回最新的 key 状态 */
+export async function saveSearchKey(keyType: 'deepseekKey' | 'kimiKey', key: string): Promise<{ hasDeepseekKey: boolean; hasKimiKey: boolean }> {
+  const r = await fetch('/api/search-config', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ [keyType]: key }),
+  });
+  const d = await r.json().catch(() => ({}));
+  if (!r.ok) throw new Error(d.error || `HTTP ${r.status}`);
+  return d;
 }
 
 // 会话持久化（SQLite via server）
@@ -680,6 +692,11 @@ export async function saveToken(token: string, baseUrl?: string): Promise<{ ok: 
     body: JSON.stringify(baseUrl ? { token, baseUrl } : { token }),
   });
   return r.json();
+}
+export async function logoutGateway(): Promise<void> {
+  const r = await fetch('/api/logout', { method: 'POST' });
+  const d = await r.json().catch(() => ({}));
+  if (!r.ok) throw new Error(d.error || `HTTP ${r.status}`);
 }
 
 export const PLUGINS_CHANGED = 'paw:plugins-changed';

@@ -2,7 +2,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { AlertCircle, ArrowDown, ArrowLeft, ArrowRight, ArrowRightLeft, CheckCircle2, ChevronUp, Eye, Globe, HelpCircle, Maximize2, Minimize2, PanelLeftClose, PanelLeftOpen, Sparkles, X } from 'lucide-react';
 import { messageText, type AgentEvent, type Attachment, type ContextReading, type HandoffContext, type PermissionDecision, type ScheduledTask, type SessionPermission, type TurnTrace, type ViewMessage, type WidgetBlock } from '@paw/shared';
 import {
-  approvePermissionApi, compactContext, createHandoff, exportSessionUrl, forkSessionApi, generateTitleApi, getGlobalPermissions, getModels, getPlugins, getSearchConfig, getSession, getTurnTracesApi, getWorkspace, importSessionsApi, notifyTurnEnd, putGlobalPermissions, removeWorkspace as removeWorkspaceApi, resolveBusinessPage, rewindFiles, setSearchConfig, setWorkspace, steerChat, streamBtw, streamChat, updateSessionPermissionApi,
+  approvePermissionApi, compactContext, createHandoff, exportSessionUrl, forkSessionApi, generateTitleApi, getGlobalPermissions, getModels, getPlugins, getSearchConfig, getSession, getTurnTracesApi, getWorkspace, importSessionsApi, notifyTurnEnd, putGlobalPermissions, removeWorkspace as removeWorkspaceApi, resolveBusinessPage, rewindFiles, saveSearchKey, setSearchConfig, setWorkspace, steerChat, streamBtw, streamChat, updateSessionPermissionApi,
   PLUGINS_CHANGED, WORKSPACE_CHANGED, type ModelInfo, type PluginPageInfo, type SearchProvider, type WidgetInfo,
 } from './api/client';
 import { widgetBlockFromEvent } from './lib/session-sync';
@@ -57,7 +57,10 @@ const CODE_KEEP = 420;
 const MSG_PAGE = 40;
 /** 上次打开的工作区：刷新后 IDE 面板立刻可用，不必先选会话 */
 
-export default function App() {
+export default function App({ gatewayBaseUrl, onLogout }: {
+  gatewayBaseUrl?: string;
+  onLogout: () => void;
+}) {
   // 会话（SQLite + localStorage）
   const {
     sessions, setSessions, activeId, setActiveId: setActiveIdRaw, ready, ensureLoaded,
@@ -149,6 +152,7 @@ export default function App() {
   };
   const [provider, setProvider] = useState<SearchProvider>('deepseek');
   const [hasKey, setHasKey] = useState(true);
+  const [hasKimiKey, setHasKimiKey] = useState(true);
   const [providerMenu, setProviderMenu] = useState(false);
   const [modelMenu, setModelMenu] = useState(false);
   const [taskPanel, setTaskPanel] = useState(false);
@@ -463,8 +467,8 @@ export default function App() {
       .then((d) => setGlobalAllow(d.allow))
       .catch(() => setGlobalAllow([]));
     getSearchConfig()
-      .then((c) => { setProvider(c.provider); setHasKey(c.hasDeepseekKey); })
-      .catch(() => setHasKey(false));
+      .then((c) => { setProvider(c.provider); setHasKey(c.hasDeepseekKey); setHasKimiKey(c.hasKimiKey); })
+      .catch(() => { setHasKey(false); setHasKimiKey(false); });
   }, [refreshModels]);
   // 兜底：任何没挂 drop handler 的地方（侧栏、标题栏、留白）都把拖放的默认行为拦掉。
   // 否则 Electron 会把窗口导航到 file:// —— 表现就是「拖个文件进来，界面直接变成了它」。
@@ -536,6 +540,12 @@ export default function App() {
     setProviderMenu(false);
     try { await setSearchConfig(p); setProvider(p); }
     catch (e) { setError((e as Error).message); }
+  };
+
+  const saveSearchKeyValue = async (keyType: 'deepseekKey' | 'kimiKey', key: string) => {
+    const st = await saveSearchKey(keyType, key);
+    setHasKey(st.hasDeepseekKey);
+    setHasKimiKey(st.hasKimiKey);
   };
 
   /** 标记某会话本轮为已停止（立刻清掉“思考中”，并随消息落库）。msgId 定位那一轮，缺省取最后一条 */
@@ -1646,7 +1656,7 @@ export default function App() {
   return (
     <div className="app">
       <Sidebar
-        sessions={sessions} activeId={activeId} runningIds={runningIds} unreadFinished={unreadFinished} provider={provider} hasKey={hasKey} providerMenu={providerMenu}
+        sessions={sessions} activeId={activeId} runningIds={runningIds} unreadFinished={unreadFinished} provider={provider} hasKey={hasKey} hasKimiKey={hasKimiKey} providerMenu={providerMenu}
         onNew={onNew}
         onSelect={selectSession}
         onNewInWorkspace={onNewInWorkspace}
@@ -1668,6 +1678,8 @@ export default function App() {
         onImportSessions={(file) => void handleImportSessions(file)}
         onSetPermissionMode={(id, mode) => void handleSetPermissionMode(id, mode)}
         onProviderToggle={() => setProviderMenu((v) => !v)} onProviderClose={() => setProviderMenu(false)} onProviderSwitch={(p) => void switchProvider(p)}
+        onSaveSearchKey={(type, key) => saveSearchKeyValue(type, key)}
+        gatewayBaseUrl={gatewayBaseUrl} onLogout={onLogout}
         onTasks={() => { setTasksTab('tasks'); setPage('tasks'); }}
         onMemory={() => setPage('memory')}
         onRemoveWorkspace={(root) => void removeWorkspaceFromList(root)}

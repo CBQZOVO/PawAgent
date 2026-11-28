@@ -34,6 +34,50 @@ export function friendlyGatewayError(status: number, raw: string): string {
   return `请求没成功：${msg.slice(0, 80) || '上游服务异常，稍后重试'} 🐾`;
 }
 
+/**
+ * 把网关根地址转成完整 API base：
+ * 普通平台（OpenAI / MiniMax 等）补 /v1；已带版本路径的（智谱 /api/paas/v4）原样保留。
+ */
+export function apiBase(baseUrl: string): string {
+  const u = baseUrl.replace(/\/+$/, '');
+  return /\/v\d+$/i.test(u) ? u : `${u}/v1`;
+}
+
+export interface ModelInfoLite {
+  id: string;
+  owned_by?: string;
+  rate_multiplier?: number | null;
+}
+
+/**
+ * 解析 /v1/models 返回：
+ * - 标准 OpenAI：{ data: [{ id, ... }] }
+ * - 海岳：{ data: { models: [{ name, info: { data: [{ id, ... }] } }] } }
+ * 海岳部分模型的 info 是鉴权错误对象（无 data），直接跳过。
+ */
+export function parseModelList(json: unknown): ModelInfoLite[] {
+  const root = json as { data?: unknown } | null;
+  let raw: unknown[] = [];
+  if (Array.isArray(root?.data)) {
+    raw = root.data;
+  } else {
+    const wrapper = root?.data as { models?: Array<{ info?: { data?: unknown } }> } | undefined;
+    if (Array.isArray(wrapper?.models)) {
+      raw = wrapper.models.flatMap((m) => (Array.isArray(m?.info?.data) ? m.info.data : []));
+    }
+  }
+  const seen = new Set<string>();
+  const out: ModelInfoLite[] = [];
+  for (const item of raw) {
+    if (!item || typeof item !== 'object') continue;
+    const m = item as ModelInfoLite;
+    if (typeof m.id !== 'string' || !m.id.trim() || seen.has(m.id)) continue;
+    seen.add(m.id);
+    out.push(m);
+  }
+  return out;
+}
+
 export interface GatewayConfig {
   baseUrl: string;
   apiKey: string;
@@ -153,7 +197,7 @@ export async function* streamChat(
   };
   armTimer(CONNECT_TIMEOUT_MS);
   try {
-    const resp = await fetchWithRetry(`${cfg.baseUrl}/v1/chat/completions`, {
+    const resp = await fetchWithRetry(`${apiBase(cfg.baseUrl)}/chat/completions`, {
       method: 'POST',
       headers: {
         Authorization: `Bearer ${cfg.apiKey}`,

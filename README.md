@@ -40,7 +40,9 @@ pnpm dev
 ```
 
 1. 打开 **http://127.0.0.1:8787**。
-2. 首次启动在登录页填入 `GATEWAY_KEY` 即可进入（验证通过后自动保存至 `~/.paw/gateway-config.json`；使用自建网关时，登录失败可点击 **「自定义网关？」** 填写 `GATEWAY_URL`）。
+2. 首次启动在登录页选择模型平台（内置 Paw / OpenAI / DeepSeek / Kimi / Kimi Code  / 硅基流动 / 通义千问 / 腾讯云 TokenHub / 智谱 GLM / MiniMax / 海岳大模型），填入该平台的 API Key 即可进入；自建网关选 **「自定义网关…」** 填写 `GATEWAY_URL`。验证通过后自动保存至 `~/.paw/gateway-config.json`，以后启动免登录。
+   >
+   > **Kimi Code（会员订阅）**：Key 与 Kimi 开放平台不通用，需从 Kimi Code 会员账号获取。官方要求保持工具真实身份标识，Paw 请求携带 `User-Agent: Paw/1.0`，使用该端点存在被风控的风险，请自行评估。
 3. 点击左侧 **「工作区 +」** 选择本地项目目录，新建会话即可开始。
 
 > **桌面端启动**：执行 `pnpm build && pnpm desktop`；打包 macOS `.app` 执行 `pnpm package-app`。

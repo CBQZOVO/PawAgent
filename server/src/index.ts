@@ -48,7 +48,7 @@ import {
   type Connection,
 } from './connections.js';
 import { getWorkspaceRoot, listWorkspaces, setWorkspaceRoot, removeWorkspace, listWorkspaceCandidates, resolveToolPath } from './workspace.js';
-import { friendlyGatewayError } from './gateway/client.js';
+import { apiBase, friendlyGatewayError, parseModelList } from './gateway/client.js';
 import {
   getPluginInventory,
   getPluginRouter,
@@ -73,7 +73,7 @@ import {
   getLatestSnapshotTs, revertWorkspaceTo, rollbackAfter, switchSessionWorkspace,
 } from './snapshots.js';
 import { runTask, startScheduler } from './scheduler.js';
-import { loadSearchConfig, saveSearchProvider, type SearchProviderName } from './tools/web-search.js';
+import { loadSearchConfig, saveSearchKeys, saveSearchProvider, type SearchProviderName } from './tools/web-search.js';
 import { DATA_DIR } from './paths.js';
 import { notifyDone } from './notify.js';
 import { buildPreviewUrl, getOfficeDownloadProgress, getOfficeStatus, installOfficeEngine } from './office-engine.js';
@@ -110,8 +110,8 @@ async function saveGatewayConfigToFile(patch: { apiKey: string; baseUrl?: string
 
 async function verifyGatewayCredentials(baseUrl: string, apiKey: string): Promise<{ ok: true } | { ok: false; error: string }> {
   try {
-    const r = await fetch(`${baseUrl}/v1/models`, {
-      headers: { Authorization: `Bearer ${apiKey}` },
+    const r = await fetch(`${apiBase(baseUrl)}/models`, {
+      headers: { Authorization: `Bearer ${apiKey}`, 'User-Agent': 'Paw/1.0' },
       signal: AbortSignal.timeout(8000),
     });
     if (r.ok) return { ok: true };
@@ -193,6 +193,27 @@ app.post('/api/token', async (c) => {
   configureTools(cfg);
   console.log('[paw] 网关配置已更新（' + GATEWAY_CONFIG_FILE + '）');
   return c.json({ ok: true, configured: true, baseUrl: cfg.baseUrl });
+});
+// 退出登录：清掉落盘的 key 和内存 cfg（保留 GATEWAY_URL，下次登录默认选中原平台）
+app.post('/api/logout', async (c) => {
+  if (process.env.GATEWAY_KEY) {
+    return c.json({ ok: false, error: 'GATEWAY_KEY 由环境变量设置，页面退出无效；请从环境变量移除' }, 400);
+  }
+  const prev = await readGatewayFileConfig();
+  const next: GatewayFileConfig = { ...prev };
+  delete next.GATEWAY_KEY;
+  delete next.apiKey;
+  try {
+    await mkdir(path.dirname(GATEWAY_CONFIG_FILE), { recursive: true });
+    await writeFile(GATEWAY_CONFIG_FILE, JSON.stringify(next, null, 2) + '\n', { encoding: 'utf-8', mode: 0o600 });
+    await chmod(GATEWAY_CONFIG_FILE, 0o600).catch(() => undefined);
+  } catch (e) {
+    return c.json({ ok: false, error: '写入失败：' + (e as Error).message }, 500);
+  }
+  cfg.apiKey = '';
+  configureTools(cfg);
+  console.log('[paw] 已退出登录');
+  return c.json({ ok: true });
 });
 // 工作区
 app.get('/api/workspace', async (c) => c.json({
@@ -788,13 +809,12 @@ app.post('/api/rewind', async (c) => {
 // 模型列表：代理网关 /v1/models（网关 key 不暴露给前端）
 app.get('/api/models', async (c) => {
   try {
-    const r = await fetch(cfg.baseUrl.replace(/\/$/, '') + '/v1/models', {
+    const r = await fetch(apiBase(cfg.baseUrl) + '/models', {
       headers: { Authorization: 'Bearer ' + cfg.apiKey, 'User-Agent': 'Paw/1.0' },
       signal: AbortSignal.timeout(10000),
     });
     if (!r.ok) throw new Error(`gateway HTTP ${r.status}`);
-    const d = (await r.json()) as { data?: Array<{ id: string; owned_by?: string; rate_multiplier?: number | null }> };
-    const models = (d.data || []).map((m) => ({ id: m.id, group: m.owned_by || '其它', rate: m.rate_multiplier ?? null }));
+    const models = parseModelList(await r.json()).map((m) => ({ id: m.id, group: m.owned_by || '其它', rate: m.rate_multiplier ?? null }));
     // default 只在网关真返回该模型时才给：本地配置的模型可能已没权限
     const def = models.some((m) => m.id === cfg.model) ? cfg.model : (models[0]?.id ?? null);
     return c.json({ models, default: def });
@@ -803,22 +823,45 @@ app.get('/api/models', async (c) => {
   }
 });
 
-// 搜索引擎配置：GET 查当前 provider，POST {provider:"deepseek"|"ddg"} 切换（写盘持久化）
+// 搜索引擎配置：GET 查当前 provider 与 key 状态；POST 可切 provider、可保存/清除 key（写盘持久化）
 app.get('/api/search-config', async (c) => {
   const sc = await loadSearchConfig();
-  return c.json({ provider: sc.provider, hasDeepseekKey: !!sc.deepseekKey });
+  return c.json({ provider: sc.provider, hasDeepseekKey: !!sc.deepseekKey, hasKimiKey: !!sc.kimiKey });
 });
 app.post('/api/search-config', async (c) => {
-  const { provider } = (await c.req.json()) as { provider?: string };
-  if (provider !== 'deepseek' && provider !== 'ddg') {
-    return c.json({ error: 'provider 必须是 deepseek 或 ddg' }, 400);
+  const body = await c.req.json() as { provider?: string; deepseekKey?: string; kimiKey?: string };
+  const { deepseekKey, kimiKey, provider } = body;
+  const hasKeys = typeof deepseekKey === 'string' || typeof kimiKey === 'string';
+  const hasProvider = provider !== undefined;
+
+  if (!hasKeys && !hasProvider) {
+    return c.json({ error: '缺少 provider 或 key 参数' }, 400);
   }
-  // env 优先级高于配置文件，提示用户
-  if (process.env.SEARCH_PROVIDER && process.env.SEARCH_PROVIDER !== provider) {
-    return c.json({ error: `SEARCH_PROVIDER 环境变量已固定为 ${process.env.SEARCH_PROVIDER}，配置文件不会生效` }, 400);
+  if (hasProvider) {
+    if (provider !== 'deepseek' && provider !== 'kimi' && provider !== 'ddg') {
+      return c.json({ error: 'provider 必须是 deepseek、kimi 或 ddg' }, 400);
+    }
+    if (process.env.SEARCH_PROVIDER && process.env.SEARCH_PROVIDER !== provider) {
+      return c.json({ error: `SEARCH_PROVIDER 环境变量已固定为 ${process.env.SEARCH_PROVIDER}，配置文件不会生效` }, 400);
+    }
   }
-  await saveSearchProvider(provider as SearchProviderName);
-  return c.json({ ok: true, provider });
+  if (hasKeys) {
+    if (typeof deepseekKey === 'string' && process.env.DEEPSEEK_SEARCH_KEY) {
+      return c.json({ error: 'DEEPSEEK_SEARCH_KEY 环境变量已设置，页面填写的 key 不生效' }, 400);
+    }
+    if (typeof kimiKey === 'string' && (process.env.KIMI_SEARCH_KEY || process.env.MOONSHOT_API_KEY)) {
+      return c.json({ error: 'KIMI_SEARCH_KEY / MOONSHOT_API_KEY 环境变量已设置，页面填写的 key 不生效' }, 400);
+    }
+  }
+  if (hasProvider) await saveSearchProvider(provider as SearchProviderName);
+  if (hasKeys) {
+    const patch: { deepseekKey?: string; kimiKey?: string } = {};
+    if (typeof deepseekKey === 'string') patch.deepseekKey = deepseekKey.trim();
+    if (typeof kimiKey === 'string') patch.kimiKey = kimiKey.trim();
+    await saveSearchKeys(patch);
+  }
+  const sc = await loadSearchConfig();
+  return c.json({ ok: true, provider: sc.provider, hasDeepseekKey: !!sc.deepseekKey, hasKimiKey: !!sc.kimiKey });
 });
 
 // 定时任务 API

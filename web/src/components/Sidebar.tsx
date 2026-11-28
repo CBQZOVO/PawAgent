@@ -9,6 +9,7 @@ import {
 import type { Session, SessionPermission, SessionSearchResult } from '@paw/shared';
 import { getWorkspace, searchSessionsApi, setWorkspace, WORKSPACE_CHANGED, type PluginPageInfo, type SearchProvider, type WorkspaceInfo } from '../api/client';
 import ProviderMenu from './ProviderMenu';
+import AccountStatus from './AccountStatus';
 import WorkspacePicker from './WorkspacePicker';
 import Tips from './Tips';
 import { useColumnResize, storedWidth } from '../hooks/useColumnResize';
@@ -75,9 +76,9 @@ function pickGroupUnread(
 /** 左侧栏：品牌 + 新会话 + 可定制菜单 + 会话列表 + 搜索引擎切换 */
 const RECENT_PREVIEW_COUNT = 5;
 export default function Sidebar({
-  sessions, activeId, provider, hasKey, providerMenu,
+  sessions, activeId, provider, hasKey, hasKimiKey, providerMenu,
   onNew, onSelect, onDelete, onHandoffSession, onExportSession, onImportSessions, onSetPermissionMode,
-  onProviderToggle, onProviderClose, onProviderSwitch, onTasks, onMemory, onRemoveWorkspace, onNewInWorkspace, page, onPage,
+  onProviderToggle, onProviderClose, onProviderSwitch, onSaveSearchKey, gatewayBaseUrl, onLogout, onTasks, onMemory, onRemoveWorkspace, onNewInWorkspace, page, onPage,
   collapsed, onToggleCollapse, ideMode, runningIds, unreadFinished, toolsTab,
   pluginPages = [], activePluginPageKey = null, onOpenPluginPage,
 }: {
@@ -87,6 +88,7 @@ export default function Sidebar({
   unreadFinished?: Map<string, SessionFinishStatus>;
   provider: SearchProvider;
   hasKey: boolean;
+  hasKimiKey: boolean;
   providerMenu: boolean;
   onNew: () => void;
   onNewInWorkspace: (root: string) => void;
@@ -100,6 +102,9 @@ export default function Sidebar({
   onProviderToggle: () => void;
   onProviderClose: () => void;
   onProviderSwitch: (p: SearchProvider) => void;
+  onSaveSearchKey: (keyType: 'deepseekKey' | 'kimiKey', key: string) => Promise<void>;
+  gatewayBaseUrl?: string;
+  onLogout: () => void;
   onTasks: () => void;
   onMemory: () => void;
   page: 'chat' | 'tools' | 'tasks' | 'memory' | 'plugin';
@@ -612,9 +617,11 @@ export default function Sidebar({
         )}
       </div>
       <ProviderMenu
-        provider={provider} hasKey={hasKey} open={providerMenu}
+        provider={provider} hasKey={hasKey} hasKimiKey={hasKimiKey} open={providerMenu}
         onToggle={onProviderToggle} onClose={onProviderClose} onSwitch={onProviderSwitch}
+        onSaveKey={onSaveSearchKey}
       />
+      <AccountStatus baseUrl={gatewayBaseUrl} onLogout={onLogout} />
       </div>
     </aside>
   );

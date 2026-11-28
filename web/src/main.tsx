@@ -25,8 +25,15 @@ function Root() {
       .catch(() => setStatus({ configured: true, file: '~/.paw/gateway-config.json' })); // 接口不通时放行，避免卡死
   }, []);
   if (!status) return <div className="token-boot"><Loader /></div>;
-  if (!status.configured) return <TokenGate status={status} onDone={() => setStatus({ ...status, configured: true })} />;
-  return <App />;
+  if (!status.configured) {
+    return <TokenGate status={status} onDone={() => {
+      void getTokenStatus().then(setStatus).catch(() => setStatus({ ...status, configured: true }));
+    }} />;
+  }
+  return <App
+    gatewayBaseUrl={status.baseUrl}
+    onLogout={() => setStatus({ ...status, configured: false })}
+  />;
 }
 function Loader() {
   return <div className="token-boot-inner"><span className="spin">◌</span> 正在启动…</div>;

@@ -1,7 +1,7 @@
 // 每轮对话收尾的「复盘」：异步调一次模型，把本轮提炼成一条工作日志 +（可选）一条记忆。
 // 对标 title.ts 的模式：第二次模型调用、跟主对话完全独立、失败只打日志不影响使用。
 // 指令放 user 消息里（网关模型对 system 角色遵循度差，title.ts 2026-11-23 实测结论）。
-import { streamChat, type GatewayConfig } from './gateway/client.js';
+import { apiBase, parseModelList, streamChat, type GatewayConfig } from './gateway/client.js';
 import { isImageModel } from './tools/image-gen.js';
 import { findMemoryByTitle, loadMemoryIndex, upsertMemoryDirect } from './tools/memory.js';
 import { insertWorkLog } from './tools/worklog.js';
@@ -45,22 +45,23 @@ function parseJsonLoose(text: string): ReflectResult | null {
 // 网关 /v1/models 的每个模型带 rate_multiplier（渠道倍率，null=未设置）。
 // 拉不到 / 全没配倍率 → 回退默认模型。缓存 10 分钟，别每轮都拉一次列表。
 
-let cheapCache: { model: string; at: number } | null = null;
+let cheapCache: { baseUrl: string; model: string; at: number } | null = null;
 const CHEAP_TTL_MS = 10 * 60 * 1000;
 
 async function pickCheapestChatModel(cfg: GatewayConfig): Promise<string> {
-  if (cheapCache && Date.now() - cheapCache.at < CHEAP_TTL_MS) return cheapCache.model;
-  const r = await fetch(cfg.baseUrl.replace(/\/$/, '') + '/v1/models', {
+  if (cheapCache && cheapCache.baseUrl === cfg.baseUrl && Date.now() - cheapCache.at < CHEAP_TTL_MS) {
+    return cheapCache.model;
+  }
+  const r = await fetch(apiBase(cfg.baseUrl) + '/models', {
     headers: { Authorization: 'Bearer ' + cfg.apiKey, 'User-Agent': 'Paw/1.0' },
     signal: AbortSignal.timeout(8000),
   });
   if (!r.ok) throw new Error(`gateway HTTP ${r.status}`);
-  const d = await r.json() as { data?: Array<{ id: string; owned_by?: string; rate_multiplier?: number | null }> };
-  const candidates = (d.data || []).filter((m) =>
+  const candidates = parseModelList(await r.json()).filter((m) =>
     typeof m.rate_multiplier === 'number' && !isImageModel(m.id) && m.owned_by !== 'Image');
   if (!candidates.length) throw new Error('没有带倍率的对话模型');
   const best = candidates.reduce((a, b) => (b.rate_multiplier as number) < (a.rate_multiplier as number) ? b : a);
-  cheapCache = { model: best.id, at: Date.now() };
+  cheapCache = { baseUrl: cfg.baseUrl, model: best.id, at: Date.now() };
   return best.id;
 }
 

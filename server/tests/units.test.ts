@@ -950,6 +950,32 @@ await atest('git_diff(staged=true) 在非 Git 目录返回带路径的友好提�
   }
 });
 
+await atest('apiBase & parseModelList：兼容标准 OpenAI / 带版本后缀网关 / 海岳嵌套结构与异常项过滤', async () => {
+  const { apiBase, parseModelList } = await import('../src/gateway/client.js');
+  assert.equal(apiBase('https://api.openai.com'), 'https://api.openai.com/v1');
+  assert.equal(apiBase('https://ingpt.inspures.com/llm/'), 'https://ingpt.inspures.com/llm/v1');
+  assert.equal(apiBase('https://open.bigmodel.cn/api/paas/v4/'), 'https://open.bigmodel.cn/api/paas/v4');
+  assert.equal(apiBase('https://api.kimi.com/coding/v1'), 'https://api.kimi.com/coding/v1');
+
+  assert.deepEqual(
+    parseModelList({ data: [{ id: 'gpt-4o' }, { id: 'gpt-4o' }, { broken: true }, null] }).map((m) => m.id),
+    ['gpt-4o'],
+  );
+  assert.deepEqual(
+    parseModelList({
+      data: {
+        models: [
+          { name: 'ok', info: { data: [{ id: 'hy-a' }, { id: 'hy-b' }] } },
+          { name: 'denied', info: { error: '403' } },
+          { name: 'dup', info: { data: [{ id: 'hy-a' }] } },
+        ],
+      },
+    }).map((m) => m.id),
+    ['hy-a', 'hy-b'],
+  );
+  assert.deepEqual(parseModelList(null), []);
+});
+
 await rm(tmp, { recursive: true, force: true });
 
 console.log(`\n${pass} 项通过`);

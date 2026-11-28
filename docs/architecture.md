@@ -118,7 +118,7 @@ model: inherit
 | `~/.paw/plugins/` | 外置动态插件目录及启停/私有配置 `plugins.json` |
 | `~/.paw/persona/` | 可选个人人设与长期记忆文件（`IDENTITY.md` / `SOUL.md` / `USER.md` / `MEMORY.md`） |
 | `~/.paw/connections.json` & `secrets.json` | 系统连接定义与独立密钥文件（`0600` 权限，密钥永不进模型上下文） |
-| `~/.paw/search-config.json` & `search-key.txt` | 内置 `web_search` 渠道（DeepSeek / DuckDuckGo）与密钥 |
+| `~/.paw/search-config.json` & `search-key.txt` | 内置 `web_search` 渠道（DeepSeek / Kimi / DuckDuckGo）与密钥；Kimi 未单独配置时复用已登录的 Moonshot 网关 Key |
 | `~/.paw/office/editor_sdk` | 本地 Office 预览引擎（不随安装包分发；首次打开文档时询问用户，确认后从 `PAW_OFFICE_URL` 下载到这里） |
 
 ### 环境变量

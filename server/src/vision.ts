@@ -10,7 +10,7 @@
 // 注意：部分渠道（qoder 系等）强制流式（非流式返回 heartbeat+SSE 无法解析），
 // 所以统一用 stream:true 收集 delta。
 import { canSeeImages, VISION_MODELS } from '@paw/shared';
-import type { GatewayConfig } from './gateway/client.js';
+import { apiBase, parseModelList, type GatewayConfig } from './gateway/client.js';
 
 type GatewayLike = Pick<GatewayConfig, 'baseUrl' | 'apiKey'>;
 
@@ -34,13 +34,12 @@ async function listGatewayModels(gateway: GatewayLike): Promise<Set<string>> {
   }
   let ids: string[] = [];
   try {
-    const r = await fetch(gateway.baseUrl.replace(/\/$/, '') + '/v1/models', {
+    const r = await fetch(apiBase(gateway.baseUrl) + '/models', {
       headers: { Authorization: `Bearer ${gateway.apiKey}`, 'User-Agent': 'Paw/1.0' },
       signal: AbortSignal.timeout(10000),
     });
     if (r.ok) {
-      const d = (await r.json()) as { data?: Array<{ id: string }> };
-      ids = (d.data || []).map((m) => m.id.toLowerCase());
+      ids = parseModelList(await r.json()).map((m) => m.id.toLowerCase());
     }
   } catch { /* 列表拿不到不影响主流程 */ }
   // 仅缓存非空结果：拉取失败或暂时返回空列表时不缓存 10 分钟，下次立刻重试
@@ -98,7 +97,7 @@ async function callVisionOnce(
   };
   // 默认不传 max_tokens（与主对话一致），由上游模型按自身默认上限输出，避免思考型模型被人为截断
   if (typeof maxTokens === 'number') payload.max_tokens = maxTokens;
-  const resp = await fetch(gateway.baseUrl.replace(/\/$/, '') + '/v1/chat/completions', {
+  const resp = await fetch(apiBase(gateway.baseUrl) + '/chat/completions', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${gateway.apiKey}`, 'User-Agent': 'Paw/1.0' },
     body: JSON.stringify(payload),
