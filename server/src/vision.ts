@@ -57,17 +57,99 @@ async function listGatewayModels(gateway: GatewayLike): Promise<Set<string>> {
  *   3. 网关现有的其它已知读图模型；
  *   4. 都没有就用首选名，让上游返回明确错误，而不是悄悄不发图。
  */
-export async function resolveVisionModel(gateway: GatewayLike, mainModel?: string): Promise<string> {
-  if (mainModel && canSeeImages(mainModel)) return mainModel;
+export async function resolveVisionModel(
+  gateway: GatewayLike,
+  mainModel?: string,
+  exclude?: Set<string>,
+): Promise<string> {
+  const excluded = (id: string) => exclude?.has(id.toLowerCase()) ?? false;
+  if (mainModel && canSeeImages(mainModel) && !excluded(mainModel)) return mainModel;
   const available = await listGatewayModels(gateway);
-  const pick = PREFERRED_VISION_MODELS.find((m) => available.has(m))
-    ?? [...VISION_MODELS].find((m) => available.has(m));
-  return pick ?? PREFERRED_VISION_MODELS[0];
+  const pick = PREFERRED_VISION_MODELS.find((m) => available.has(m) && !excluded(m))
+    ?? [...VISION_MODELS].find((m) => available.has(m) && !excluded(m));
+  return pick ?? PREFERRED_VISION_MODELS.find((m) => !excluded(m)) ?? PREFERRED_VISION_MODELS[0];
+}
+
+interface VisionCallResult {
+  content: string;
+  reasoning: string;
+  finishReason: string;
+}
+
+/** 单次调用指定视觉模型，同时收集 content 与 reasoning_content（兼容思考型视觉模型） */
+async function callVisionOnce(
+  model: string,
+  dataUrl: string,
+  gateway: GatewayLike,
+  prompt: string,
+  maxTokens: number | undefined,
+  signal?: AbortSignal,
+): Promise<VisionCallResult> {
+  const payload: Record<string, unknown> = {
+    model,
+    stream: true,
+    messages: [{
+      role: 'user',
+      content: [
+        { type: 'text', text: prompt },
+        { type: 'image_url', image_url: { url: dataUrl } },
+      ],
+    }],
+  };
+  // 默认不传 max_tokens（与主对话一致），由上游模型按自身默认上限输出，避免思考型模型被人为截断
+  if (typeof maxTokens === 'number') payload.max_tokens = maxTokens;
+  const resp = await fetch(gateway.baseUrl.replace(/\/$/, '') + '/v1/chat/completions', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${gateway.apiKey}`, 'User-Agent': 'Paw/1.0' },
+    body: JSON.stringify(payload),
+    signal: signal ? AbortSignal.any([signal, AbortSignal.timeout(90000)]) : AbortSignal.timeout(90000),
+  });
+  if (!resp.ok) throw new Error(`识别模型 ${model} HTTP ${resp.status}: ${(await resp.text()).slice(0, 100)}`);
+
+  // 收集 SSE delta（部分渠道把思考过程放在 reasoning_content / reasoning）
+  let content = '';
+  let reasoning = '';
+  let finishReason = '';
+  const reader = resp.body?.getReader();
+  if (!reader) throw new Error('识别响应无 body');
+  const dec = new TextDecoder();
+  let buf = '';
+  const consumeLine = (line: string) => {
+    const s = line.trim();
+    if (!s.startsWith('data:')) return;
+    const payload = s.slice(5).trim();
+    if (!payload || payload === '[DONE]') return;
+    try {
+      const d = JSON.parse(payload);
+      const choice = d.choices?.[0];
+      const delta = choice?.delta;
+      if (typeof delta?.content === 'string') content += delta.content;
+      const r = delta?.reasoning_content ?? delta?.reasoning;
+      if (typeof r === 'string') reasoning += r;
+      if (typeof choice?.finish_reason === 'string' && choice.finish_reason) {
+        finishReason = choice.finish_reason;
+      }
+    } catch { /* 忽略非法 chunk */ }
+  };
+  for (;;) {
+    const { done, value } = await reader.read();
+    if (done) break;
+    buf += dec.decode(value, { stream: true });
+    const lines = buf.split('\n');
+    buf = lines.pop() || '';
+    for (const line of lines) consumeLine(line);
+  }
+  if (buf.trim()) consumeLine(buf);
+  return { content: content.trim(), reasoning: reasoning.trim(), finishReason };
 }
 
 /**
  * 识别一张图片，返回文字。
- * signal：用户停止时取消上游请求。opts.prompt 自定义提问（read_image 用），opts.maxTokens 输出上限。
+ * signal：用户停止时取消上游请求。opts.prompt 自定义提问（read_image 用），opts.maxTokens 可选输出上限（默认不传）。
+ *
+ * 思考型模型（如 hy4flash-free）的 max_tokens 同时包含 reasoning_content 和正文，不传 max_tokens 可避免
+ * 人为卡死输出上限；若上游仍出现空正文，自动换一个兜底视觉模型重试，仍无正文时回退到已收集的
+ * reasoning 文本，绝不静默返回空串。
  */
 export async function describeImage(
   dataUrl: string,
@@ -75,48 +157,27 @@ export async function describeImage(
   signal?: AbortSignal,
   opts: { prompt?: string; maxTokens?: number; mainModel?: string } = {},
 ): Promise<string> {
-  const model = await resolveVisionModel(gateway, opts.mainModel);
-  const resp = await fetch(gateway.baseUrl.replace(/\/$/, '') + '/v1/chat/completions', {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${gateway.apiKey}`, 'User-Agent': 'Paw/1.0' },
-    body: JSON.stringify({
-      model,
-      stream: true,
-      max_tokens: opts.maxTokens ?? 300,
-      messages: [{
-        role: 'user',
-        content: [
-          { type: 'text', text: opts.prompt ?? DESCRIBE_PROMPT },
-          { type: 'image_url', image_url: { url: dataUrl } },
-        ],
-      }],
-    }),
-    signal: signal ? AbortSignal.any([signal, AbortSignal.timeout(60000)]) : AbortSignal.timeout(60000),
-  });
-  if (!resp.ok) throw new Error(`识别模型 ${model} HTTP ${resp.status}: ${(await resp.text()).slice(0, 100)}`);
+  const prompt = opts.prompt ?? DESCRIBE_PROMPT;
+  const maxTokens = opts.maxTokens;
+  const primary = await resolveVisionModel(gateway, opts.mainModel);
+  const first = await callVisionOnce(primary, dataUrl, gateway, prompt, maxTokens, signal);
+  if (first.content) return first.content;
 
-  // 收集 SSE delta
-  let text = '';
-  const reader = resp.body?.getReader();
-  if (!reader) throw new Error('识别响应无 body');
-  const dec = new TextDecoder();
-  let buf = '';
-  for (;;) {
-    const { done, value } = await reader.read();
-    if (done) break;
-    buf += dec.decode(value, { stream: true });
-    const lines = buf.split('\n');
-    buf = lines.pop() || '';
-    for (const line of lines) {
-      const s = line.trim();
-      if (!s.startsWith('data:')) continue;
-      const payload = s.slice(5).trim();
-      if (!payload || payload === '[DONE]') continue;
-      try {
-        const d = JSON.parse(payload);
-        text += d.choices?.[0]?.delta?.content || '';
-      } catch { /* 忽略非法 chunk */ }
-    }
+  // 正文为空（常见原因：思考模型把 max_tokens 全花在 reasoning_content 上导致 finish_reason=length）
+  // → 换一个其它视觉模型重试一次，避免 read_image 静默返回空串
+  let fallback: VisionCallResult | null = null;
+  const tried = new Set([primary.toLowerCase()]);
+  const alt = await resolveVisionModel(gateway, undefined, tried);
+  if (alt && !tried.has(alt.toLowerCase()) && !signal?.aborted) {
+    try {
+      fallback = await callVisionOnce(alt, dataUrl, gateway, prompt, maxTokens, signal);
+      if (fallback.content) return fallback.content;
+    } catch { /* 兜底模型失败时继续走下方 reasoning 回退或报错 */ }
   }
-  return text.trim();
+
+  // 两个模型都没吐正文但有思考内容：比直接报错/空串有用得多，至少把已识别的画面细节带回主对话
+  const recovered = fallback?.reasoning || first.reasoning;
+  if (recovered) return recovered;
+
+  throw new Error(`识别模型 ${primary} 未返回任何文本内容（finish_reason=${first.finishReason || 'unknown'}）`);
 }

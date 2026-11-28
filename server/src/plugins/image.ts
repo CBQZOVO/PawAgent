@@ -50,7 +50,7 @@ export const imagePlugin: PawPlugin<ServerToolExecCtx> = {
           ? `\n\n用户特别关注：${args.question.trim()}`
           : '';
         return await describeImage(dataUrl, ctx.gateway, ctx.signal, {
-          prompt: READ_IMAGE_PROMPT + focus, maxTokens: 2000, mainModel: ctx.gateway.model,
+          prompt: READ_IMAGE_PROMPT + focus, mainModel: ctx.gateway.model,
         });
       },
     },

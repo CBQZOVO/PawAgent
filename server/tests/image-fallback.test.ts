@@ -6,7 +6,7 @@ import { tmpdir } from 'node:os';
 import path from 'node:path';
 import type { Attachment, ChatMessage } from '@paw/shared';
 import { listSessionAttachments, nameKey, parseImageDataUrl, persistAttachments } from '../src/attachments.js';
-import { resolveVisionModel } from '../src/vision.js';
+import { describeImage, resolveVisionModel } from '../src/vision.js';
 import { streamChat } from '../src/gateway/client.js';
 
 let pass = 0;
@@ -199,6 +199,69 @@ await test('streamChat：模型调过工具后（数组末尾是 tool 消息）�
     assert.equal(sent[0].content.filter((p: any) => p.type === 'image_url').length, 1, '图片挂在 user 消息上');
     assert.equal(sent[0].content[0].type, 'text', '文本 part 在前');
     assert.equal(sent[2].content, '结果', 'tool 消息不受影响');
+  } finally {
+    globalThis.fetch = realFetch;
+  }
+});
+
+// ---------- describeImage：思考模型空正文自动兜底、绝不静默返回空串 ----------
+await test('describeImage：主模型思考打满 length 无正文时自动切兜底视觉模型重试', async () => {
+  const calledModels: string[] = [];
+  const sseOf = (delta: Record<string, unknown>, finish = 'stop') =>
+    `data: ${JSON.stringify({ choices: [{ delta, finish_reason: finish }] })}\n\ndata: [DONE]\n\n`;
+  globalThis.fetch = (async (input: string | URL | Request, init?: RequestInit) => {
+    const url = String(input instanceof Request ? input.url : input);
+    if (url.endsWith('/v1/models')) {
+      return new Response(JSON.stringify({ data: [{ id: 'hy4flash-free' }, { id: 'glm-5.3-flashx' }] }), { status: 200 });
+    }
+    const body = JSON.parse(String(init?.body));
+    assert.equal('max_tokens' in body, false, '默认不传 max_tokens，避免截断思考型模型');
+    calledModels.push(body.model);
+    if (body.model === 'hy4flash-free') {
+      return new Response(sseOf({ content: '', reasoning_content: '思考中...' }, 'length'), { status: 200 });
+    }
+    return new Response(sseOf({ content: '图里是一只奶蛙桌宠' }, 'stop'), { status: 200 });
+  }) as typeof fetch;
+  try {
+    const out = await describeImage('data:image/png;base64,AA==', gw('vis-retry'), undefined, { mainModel: 'hy4flash-free' });
+    assert.deepEqual(calledModels, ['hy4flash-free', 'glm-5.3-flashx']);
+    assert.equal(out, '图里是一只奶蛙桌宠');
+  } finally {
+    globalThis.fetch = realFetch;
+  }
+});
+
+await test('describeImage：兜底也无正文但有思考内容时回退思考内容；全空时明确抛错', async () => {
+  const sseOf = (delta: Record<string, unknown>, finish = 'length') =>
+    `data: ${JSON.stringify({ choices: [{ delta, finish_reason: finish }] })}\n\ndata: [DONE]\n\n`;
+  globalThis.fetch = (async (input: string | URL | Request, init?: RequestInit) => {
+    const url = String(input instanceof Request ? input.url : input);
+    if (url.endsWith('/v1/models')) {
+      return new Response(JSON.stringify({ data: [{ id: 'hy4flash-free' }, { id: 'glm-5.3-flashx' }] }), { status: 200 });
+    }
+    const body = JSON.parse(String(init?.body));
+    if (body.model === 'hy4flash-free') {
+      return new Response(sseOf({ content: '', reasoning_content: '画面顶部有 Mac 菜单栏和奶蛙' }), { status: 200 });
+    }
+    return new Response('upstream error', { status: 502 });
+  }) as typeof fetch;
+  try {
+    const out = await describeImage('data:image/png;base64,AA==', gw('vis-reason'), undefined, { mainModel: 'hy4flash-free' });
+    assert.equal(out, '画面顶部有 Mac 菜单栏和奶蛙');
+  } finally {
+    globalThis.fetch = realFetch;
+  }
+
+  globalThis.fetch = (async (input: string | URL | Request) => {
+    const url = String(input instanceof Request ? input.url : input);
+    if (url.endsWith('/v1/models')) return new Response(JSON.stringify({ data: [{ id: 'hy4flash-free' }] }), { status: 200 });
+    return new Response(sseOf({ content: '' }, 'stop'), { status: 200 });
+  }) as typeof fetch;
+  try {
+    await assert.rejects(
+      () => describeImage('data:image/png;base64,AA==', gw('vis-empty'), undefined, { mainModel: 'hy4flash-free' }),
+      /未返回任何文本内容/,
+    );
   } finally {
     globalThis.fetch = realFetch;
   }
