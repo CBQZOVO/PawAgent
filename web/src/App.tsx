@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import { ArrowDown, ArrowLeft, ArrowRight, ArrowRightLeft, ChevronUp, Eye, Globe, Maximize2, Minimize2, PanelLeftClose, PanelLeftOpen, Sparkles } from 'lucide-react';
+import { AlertCircle, ArrowDown, ArrowLeft, ArrowRight, ArrowRightLeft, CheckCircle2, ChevronUp, Eye, Globe, HelpCircle, Maximize2, Minimize2, PanelLeftClose, PanelLeftOpen, Sparkles, X } from 'lucide-react';
 import { messageText, type AgentEvent, type Attachment, type ContextReading, type HandoffContext, type PermissionDecision, type ScheduledTask, type SessionPermission, type TurnTrace, type ViewMessage, type WidgetBlock } from '@paw/shared';
 import {
   approvePermissionApi, compactContext, createHandoff, exportSessionUrl, forkSessionApi, generateTitleApi, getGlobalPermissions, getModels, getPlugins, getSearchConfig, getSession, getTurnTracesApi, getWorkspace, importSessionsApi, notifyTurnEnd, putGlobalPermissions, removeWorkspace as removeWorkspaceApi, resolveBusinessPage, rewindFiles, setSearchConfig, setWorkspace, steerChat, streamBtw, streamChat, updateSessionPermissionApi,
@@ -16,7 +16,7 @@ import Composer, { type BtwState, type QueuedMessage } from './components/Compos
 import MessageRow from './components/MessageRow';
 import type { PermissionAskItem } from './components/PermissionCard';
 import TracePanel from './components/TracePanel';
-import Sidebar from './components/Sidebar';
+import Sidebar, { type SessionFinishStatus } from './components/Sidebar';
 import TaskPanel from './components/TaskPanel';
 import ToolsPage from './components/ToolsPage';
 import TasksPage from './components/TasksPage';
@@ -71,6 +71,10 @@ export default function App() {
   const [globalAllow, setGlobalAllow] = useState<string[]>([]);
   const globalAllowRef = useRef<string[]>([]);
   globalAllowRef.current = globalAllow;
+  // 新对话尚未落库，输入框里选的模式先记在草稿里，首条消息发送时带进新会话
+  const [draftPermissionMode, setDraftPermissionMode] = useState<SessionPermission['mode']>('default');
+  const draftPermissionModeRef = useRef(draftPermissionMode);
+  draftPermissionModeRef.current = draftPermissionMode;
   const pendingCompactions = useRef(new Set<string>());
   const [compactingIds, setCompactingIds] = useState<Set<string>>(new Set());
   const [compactNotice, setCompactNotice] = useState<{ sid: string; text: string } | null>(null);
@@ -87,6 +91,12 @@ export default function App() {
   const titleCancelRef = useRef(false);
   // 「生成中」绑定到会话：切走会话后，旧会话的运行状态不会错画到当前会话上
   const [runningIds, setRunningIds] = useState<Set<string>>(new Set());
+  // 后台会话运行结束后的未读标记（侧栏徽标，点进会话后自动清除）与右上角可点击浮层提示
+  const [unreadFinished, setUnreadFinished] = useState<Map<string, SessionFinishStatus>>(new Map());
+  const [bgToasts, setBgToasts] = useState<Array<{ id: string; sessionId: string; title: string; status: SessionFinishStatus; at: number }>>([]);
+  const bgToastTimersRef = useRef<Map<string, ReturnType<typeof setTimeout>>>(new Map());
+  const sessionsRef = useRef(sessions);
+  sessionsRef.current = sessions;
   // 按会话隔离的待发送消息队列（会话进行中发消息自动排队，本轮完成后自动出队）
   const [queues, setQueues] = useState<Map<string, QueuedMessage[]>>(new Map());
   const queuesRef = useRef<Map<string, QueuedMessage[]>>(queues);
@@ -170,6 +180,58 @@ export default function App() {
   });
   useEffect(() => { setWidgetPanel(null); }, [activeId]);
   const [page, setPage] = useState<'chat' | 'tools' | 'tasks' | 'memory' | 'plugin'>('chat');
+  const pageRef = useRef(page);
+  pageRef.current = page;
+
+  const dismissBgToast = useCallback((sid: string) => {
+    const timer = bgToastTimersRef.current.get(sid);
+    if (timer) {
+      clearTimeout(timer);
+      bgToastTimersRef.current.delete(sid);
+    }
+    setBgToasts((prev) => prev.some((t) => t.sessionId === sid) ? prev.filter((t) => t.sessionId !== sid) : prev);
+  }, []);
+
+  const clearSessionUnread = useCallback((sid: string) => {
+    dismissBgToast(sid);
+    setUnreadFinished((prev) => {
+      if (!prev.has(sid)) return prev;
+      const next = new Map(prev);
+      next.delete(sid);
+      return next;
+    });
+  }, [dismissBgToast]);
+
+  const notifyBackgroundFinish = useCallback((sid: string, status: SessionFinishStatus, fallbackTitle: string) => {
+    // 只有当前未停在该会话的对话页时，才需要后台结束提示（前台正在看时不打扰）
+    if (sid === currentSession.current && pageRef.current === 'chat') return;
+    const title = sessionsRef.current.find((s) => s.id === sid)?.title || fallbackTitle || '新会话';
+    setUnreadFinished((prev) => {
+      if (prev.get(sid) === status) return prev;
+      const next = new Map(prev);
+      next.set(sid, status);
+      return next;
+    });
+    const prevTimer = bgToastTimersRef.current.get(sid);
+    if (prevTimer) clearTimeout(prevTimer);
+    setBgToasts((prev) => [
+      { id: `${sid}-${Date.now()}`, sessionId: sid, title, status, at: Date.now() },
+      ...prev.filter((t) => t.sessionId !== sid),
+    ].slice(0, 4));
+    bgToastTimersRef.current.set(sid, setTimeout(() => {
+      bgToastTimersRef.current.delete(sid);
+      setBgToasts((prev) => prev.filter((t) => t.sessionId !== sid));
+    }, 12_000));
+  }, []);
+
+  useEffect(() => {
+    if (activeId && page === 'chat') clearSessionUnread(activeId);
+  }, [activeId, page, clearSessionUnread]);
+
+  useEffect(() => () => {
+    for (const timer of bgToastTimersRef.current.values()) clearTimeout(timer);
+    bgToastTimersRef.current.clear();
+  }, []);
   const [pluginPages, setPluginPages] = useState<PluginPageInfo[]>([]);
   const [activePluginPageKey, setActivePluginPageKey] = useState<string | null>(null);
   useEffect(() => {
@@ -574,7 +636,7 @@ export default function App() {
         const explicit = nextWorkspaceRef.current;
         ws = explicit ? explicit.value : ((await getWorkspace()).root ?? null);
         nextWorkspaceRef.current = null;
-        createdPermission = { mode: 'default', allow: [...globalAllowRef.current], deny: [] };
+        createdPermission = { mode: draftPermissionModeRef.current, allow: [...globalAllowRef.current], deny: [] };
         targetId = createSession({ title: titleFromText(text), source, taskId, workspace: ws || undefined, permission: createdPermission });
         dispatchingIdsRef.current.delete('__creating__');
         dispatchingIdsRef.current.add(targetId);
@@ -617,6 +679,7 @@ export default function App() {
     const ctrl = new AbortController();
     abortMap.current.set(targetId!, ctrl);
     setRunningIds((prev) => new Set(prev).add(targetId!));
+    clearSessionUnread(targetId!);
     const m0tools = new Map<string, Record<string, unknown>>(); // tool id → args（IDE 变更追踪用）
     if (ws) setIdeRoot(ws);
     // 看门狗：半开连接（合盖唤醒、代理静默断开）时 reader.read() 永久挂起且不抛错，
@@ -633,6 +696,7 @@ export default function App() {
     let sawDone = false;
     let sawAsk = false;
     let sawError = false;
+    let caughtError = false;
     // 正文与工具调用计数：模型“正常结束”但一个字没回时给出明确提示，别静默结束
     let textChars = 0;
     let toolCount = 0;
@@ -800,6 +864,7 @@ export default function App() {
       flushEvents();
       // 模型正常返回 done 但正文一个字没有、工具也没调用：如实提示，别让这轮静默结束
       if (sawDone && !sawAsk && !sawError && textChars === 0 && toolCount === 0) {
+        sawError = true;
         applyEvent(targetId!, { type: 'error', message: '模型没有返回任何内容，本轮已结束。可点击重试，或换个模型再试' }, assistantMsg.id);
       }
       // 流结束了但既没有 done 也没有 error/ask：服务端在发事件前就挂了
@@ -812,9 +877,13 @@ export default function App() {
     } catch (e) {
       flushEvents();
       if ((e as Error).name === 'AbortError') {
-        if (watchdogFired) setError('连接中断：超过 6 分钟没有收到任何响应，已停止本轮');
+        if (watchdogFired) {
+          caughtError = true;
+          setError('连接中断：超过 6 分钟没有收到任何响应，已停止本轮');
+        }
         markStreamStopped(targetId!, assistantMsg.id);
       } else {
+        caughtError = true;
         setError((e as Error).message);
         markStreamStopped(targetId!, assistantMsg.id); // 网络/客户端异常也别永远停在“思考中”
       }
@@ -858,6 +927,13 @@ export default function App() {
       if (targetId && (sawDone || sawError) && !sawAsk && !wasManualStop && !ctrl.signal.aborted && hasQueued) {
         autoDrainIdsRef.current.add(targetId);
       }
+      // 后台会话运行结束提示：排除用户手动停止、删除中止、以及马上要自动出队续跑的情况
+      const willAutoDrain = targetId ? autoDrainIdsRef.current.has(targetId) : false;
+      if (targetId && !wasManualStop && !(ctrl.signal.aborted && !watchdogFired) && !willAutoDrain) {
+        const outcome: SessionFinishStatus =
+          sawAsk ? 'ask' : (sawError || caughtError || !sawDone) ? 'error' : 'done';
+        notifyBackgroundFinish(targetId, outcome, titleFromText(effectiveText));
+      }
       setRunningIds((prev) => { const n = new Set(prev); n.delete(targetId!); return n; });
       if (targetId) dispatchingIdsRef.current.delete(targetId);
       dispatchingIdsRef.current.delete('__creating__');
@@ -868,6 +944,7 @@ export default function App() {
         void generateTitleApi(effectiveText, mdl).then((t) => {
           if (!t) return;
           setSessions((prev) => prev.map((s) => s.id === targetId && s.title === fallback ? { ...s, title: t } : s));
+          setBgToasts((prev) => prev.map((toast) => toast.sessionId === targetId && toast.title === fallback ? { ...toast, title: t } : toast));
         });
       }
     }
@@ -1089,7 +1166,7 @@ export default function App() {
         title: res.suggestedTitle,
         workspace: ws || undefined,
         handoffFrom: { sessionId: sid, title: session.title },
-        permission: { mode: 'default', allow: [...globalAllowRef.current], deny: [] },
+        permission: { mode: draftPermissionModeRef.current, allow: [...globalAllowRef.current], deny: [] },
       });
       // 在源会话上写入前向跳转锚点，方便后续来回溯源
       setSessions((prev) => prev.map((s) => s.id === sid ? {
@@ -1551,24 +1628,27 @@ export default function App() {
     setSelectedSkills((prev) => [...new Set([...prev, ...ids])]);
   };
 
+  const selectSession = (id: string, messageId?: string) => {
+    const s = sessionsRef.current.find((x) => x.id === id);
+    nextWorkspaceRef.current = null;
+    switchSession(id);
+    setPage('chat');
+    clearSessionUnread(id);
+    if (s) void setWorkspace(s.workspace ?? null); // 续聊沿用会话自己的工作区
+    if (messageId) {
+      setJumpTarget({ sessionId: id, messageId, seq: Date.now() });
+      void ensureLoaded(id);
+    } else {
+      setJumpTarget(null);
+    }
+  };
+
   return (
     <div className="app">
       <Sidebar
-        sessions={sessions} activeId={activeId} runningIds={runningIds} provider={provider} hasKey={hasKey} providerMenu={providerMenu}
+        sessions={sessions} activeId={activeId} runningIds={runningIds} unreadFinished={unreadFinished} provider={provider} hasKey={hasKey} providerMenu={providerMenu}
         onNew={onNew}
-        onSelect={(id, messageId) => {
-          const s = sessions.find((x) => x.id === id);
-          nextWorkspaceRef.current = null;
-          switchSession(id);
-          setPage('chat');
-          if (s) void setWorkspace(s.workspace ?? null); // 续聊沿用会话自己的工作区
-          if (messageId) {
-            setJumpTarget({ sessionId: id, messageId, seq: Date.now() });
-            void ensureLoaded(id);
-          } else {
-            setJumpTarget(null);
-          }
-        }}
+        onSelect={selectSession}
         onNewInWorkspace={onNewInWorkspace}
         onDelete={(id) => {
           // 删除正在流式的会话先掐掉流：否则模型在后台把整轮跑完，白烧 token
@@ -1576,6 +1656,7 @@ export default function App() {
           if (ctrl) { ctrl.abort(); abortMap.current.delete(id); }
           draftsRef.current.delete(id);
           sessionModelsRef.current.delete(id);
+          clearSessionUnread(id);
           if (currentSession.current === id) {
             currentSession.current = '';
             if (inputRef.current) { inputRef.current = ''; setInput(''); }
@@ -1851,6 +1932,11 @@ export default function App() {
           input={input} attachments={attachments} readingFiles={readingFiles} busy={runningIds.has(activeId)} model={model} models={models}
           modelMenu={modelMenu} modelSearch={modelSearch} modelsRefreshing={modelsRefreshing}
           selectedSkills={selectedSkills} focusRef={focusRef}
+          permissionMode={active?.permission?.mode ?? draftPermissionMode}
+          onSetPermissionMode={(mode) => {
+            if (activeId) void handleSetPermissionMode(activeId, mode);
+            else setDraftPermissionMode(mode);
+          }}
           selectedConnection={selectedConnection} onSelectConnection={setSelectedConnection}
           onInput={setInput}
           onSkillPaste={onSkillPaste}
@@ -1958,6 +2044,48 @@ export default function App() {
             void forkSession(ask.sid, ask.msgId);
           }}
         />
+      )}
+      {bgToasts.length > 0 && (
+        <div className="bg-toast-stack" role="status" aria-live="polite">
+          {bgToasts.map((toast) => {
+            const label =
+              toast.status === 'ask' ? '后台会话等待回复'
+                : toast.status === 'error' ? '后台会话执行出错'
+                  : '后台会话已完成';
+            return (
+              <div
+                key={toast.id}
+                className={`bg-toast ${toast.status}`}
+                onClick={() => selectSession(toast.sessionId)}
+              >
+                <span className={`bg-toast-icon ${toast.status}`}>
+                  {toast.status === 'ask' ? <HelpCircle size={16} />
+                    : toast.status === 'error' ? <AlertCircle size={16} />
+                      : <CheckCircle2 size={16} />}
+                </span>
+                <div className="bg-toast-body">
+                  <div className="bg-toast-label">{label}</div>
+                  <div className="bg-toast-title" title={toast.title}>{toast.title}</div>
+                </div>
+                <button
+                  type="button"
+                  className="bg-toast-open"
+                  onClick={(e) => { e.stopPropagation(); selectSession(toast.sessionId); }}
+                >
+                  查看
+                </button>
+                <button
+                  type="button"
+                  className="bg-toast-close"
+                  aria-label="关闭提示"
+                  onClick={(e) => { e.stopPropagation(); dismissBgToast(toast.sessionId); }}
+                >
+                  <X size={14} />
+                </button>
+              </div>
+            );
+          })}
+        </div>
       )}
     </div>
   );

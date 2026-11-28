@@ -1,8 +1,8 @@
 import { useEffect, useRef, useState } from 'react';
 import type { RefObject } from 'react';
-import { ArrowRightLeft, ArrowUp, Check, ChevronDown, Copy, CornerDownRight, Folder, HelpCircle, Image as ImageIcon, Link2, Paperclip, Pencil, Sparkles, Square, Trash2, X } from 'lucide-react';
+import { ArrowRightLeft, ArrowUp, Check, ChevronDown, Copy, CornerDownRight, Eye, Folder, HelpCircle, Image as ImageIcon, Link2, Paperclip, Pencil, Shield, Sparkles, Square, Trash2, X } from 'lucide-react';
 import FileBadge from './FileBadge';
-import type { Attachment, ContextReading, HandoffContext, ViewMessage } from '@paw/shared';
+import type { Attachment, ContextReading, HandoffContext, SessionPermission, ViewMessage } from '@paw/shared';
 import { getSkills, WORKSPACE_CHANGED, type ModelInfo, type SkillSummary } from '../api/client';
 import { filesFromDataTransfer, hasDroppedFiles } from '../lib/dnd-files';
 import ModelMenu from './ModelMenu';
@@ -29,10 +29,17 @@ export interface BtwState {
   error?: string;
 }
 
+const PERMISSION_MODES: ReadonlyArray<{ mode: SessionPermission['mode']; label: string; hint: string }> = [
+  { mode: 'default', label: '默认模式', hint: '工具直接执行' },
+  { mode: 'strict', label: '严格确认', hint: '工具调用逐次确认' },
+  { mode: 'plan', label: '只读计划', hint: '只调研，禁止有副作用的修改' },
+];
+
 /** 输入区：队列卡片 + /btw 旁路卡片 + textarea + 附件/技能 chip + 上传/技能/模型/发送 */
 export default function Composer({
   input, attachments, readingFiles, busy, compacting, model, models, modelMenu, modelSearch, modelsRefreshing,
   contextSessionId, contextTurn, contextMessages, contextReading, selectedSkills, selectedConnection, onSelectConnection, focusRef,
+  permissionMode, onSetPermissionMode,
   handoffDraft, onUpdateHandoffDraft, onClearHandoffDraft, onOpenHandoffSource, onCompact, onHandoff,
   btwMode = false, onToggleBtw, btwState = null, onStopBtw, onCloseBtw,
   queuedMessages = [], onSteerQueued, onEditQueued, onDeleteQueued,
@@ -60,6 +67,9 @@ export default function Composer({
   onSelectConnection: (code: string | null) => void;
   /** 富文本输入区暴露的 focus（发送后自动聚焦） */
   focusRef: RefObject<ComposerFocus | null>;
+  /** 当前会话权限模式（默认模式时可不传） */
+  permissionMode?: SessionPermission['mode'];
+  onSetPermissionMode?: (mode: SessionPermission['mode']) => void;
   /** 待随首条消息发出的会话交接草稿（方案 A：独立可展开/可编辑卡片） */
   handoffDraft?: HandoffContext | null;
   onUpdateHandoffDraft?: (summary: string) => void;
@@ -95,8 +105,10 @@ export default function Composer({
   const fileRef = useRef<HTMLInputElement>(null);
   const skillWrapRef = useRef<HTMLDivElement>(null);
   const connWrapRef = useRef<HTMLDivElement>(null);
+  const permWrapRef = useRef<HTMLDivElement>(null);
   const [skillMenu, setSkillMenu] = useState(false);
   const [connMenu, setConnMenu] = useState(false);
+  const [permMenu, setPermMenu] = useState(false);
   const [conns, setConns] = useState<{ code: string; name: string; kind?: string }[]>([]);
   const [skillSearch, setSkillSearch] = useState('');
   const [skills, setSkills] = useState<SkillSummary[]>([]);
@@ -129,6 +141,15 @@ export default function Composer({
     document.addEventListener('mousedown', onDown);
     return () => document.removeEventListener('mousedown', onDown);
   }, [connMenu]);
+
+  useEffect(() => {
+    if (!permMenu) return;
+    const onDown = (e: MouseEvent) => {
+      if (permWrapRef.current && !permWrapRef.current.contains(e.target as Node)) setPermMenu(false);
+    };
+    document.addEventListener('mousedown', onDown);
+    return () => document.removeEventListener('mousedown', onDown);
+  }, [permMenu]);
 
   // 点击弹窗外关闭（用 mousedown：点按钮本身时 toggle 照常，点别处才关）
   useEffect(() => {
@@ -432,6 +453,35 @@ export default function Composer({
               </div>
             )}
           </div>
+          {onSetPermissionMode && (
+            <div className="skill-wrap perm-wrap" ref={permWrapRef}>
+              <button
+                type="button"
+                className={'attach-btn perm-chip' + (permissionMode && permissionMode !== 'default' ? ' active' : '')}
+                onClick={() => setPermMenu((v) => !v)}
+                title={`当前权限：${PERMISSION_MODES.find((p) => p.mode === (permissionMode ?? 'default'))?.label}（点击切换）`}
+              >
+                {permissionMode === 'plan' ? <Eye size={15} /> : <Shield size={15} />}
+                <span className="perm-chip-label">{PERMISSION_MODES.find((p) => p.mode === (permissionMode ?? 'default'))?.label.replace('模式', '')}</span>
+              </button>
+              {permMenu && (
+                <div className="skill-menu popup-up perm-menu">
+                  <div className="skill-list">
+                    {PERMISSION_MODES.map((p) => (
+                      <button
+                        key={p.mode}
+                        className={'skill-opt' + ((permissionMode ?? 'default') === p.mode ? ' selected' : '')}
+                        onClick={() => { onSetPermissionMode(p.mode); setPermMenu(false); }}
+                      >
+                        <span><strong>{p.label}</strong><small>{p.hint}</small></span>
+                        {(permissionMode ?? 'default') === p.mode && <Check size={13} />}
+                      </button>
+                    ))}
+                  </div>
+                </div>
+              )}
+            </div>
+          )}
           <WorkspacePicker variant="chip" />
           {onToggleBtw && (
             <button

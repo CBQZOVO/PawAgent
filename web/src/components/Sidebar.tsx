@@ -46,18 +46,45 @@ function renderPluginIcon(icon?: string): ReactNode {
   }
 }
 
+/** 后台会话运行结束后的未读结果状态（侧栏徽标与浮层提示共用） */
+export type SessionFinishStatus = 'done' | 'ask' | 'error';
+
+const FINISH_STATUS_TIP: Record<SessionFinishStatus, string> = {
+  done: '运行已完成，点击查看',
+  ask: '等待你的回复，点击查看',
+  error: '运行出错，点击查看',
+};
+
+/** 合并多个子会话的未读状态：出错 > 等待回复 > 已完成 */
+function pickGroupUnread(
+  list: Session[],
+  unreadFinished?: Map<string, SessionFinishStatus>,
+): SessionFinishStatus | undefined {
+  if (!unreadFinished || unreadFinished.size === 0) return undefined;
+  let picked: SessionFinishStatus | undefined;
+  for (const s of list) {
+    const st = unreadFinished.get(s.id);
+    if (!st) continue;
+    if (st === 'error') return 'error';
+    if (st === 'ask') picked = 'ask';
+    else if (!picked) picked = 'done';
+  }
+  return picked;
+}
+
 /** 左侧栏：品牌 + 新会话 + 可定制菜单 + 会话列表 + 搜索引擎切换 */
 const RECENT_PREVIEW_COUNT = 5;
 export default function Sidebar({
   sessions, activeId, provider, hasKey, providerMenu,
   onNew, onSelect, onDelete, onHandoffSession, onExportSession, onImportSessions, onSetPermissionMode,
   onProviderToggle, onProviderClose, onProviderSwitch, onTasks, onMemory, onRemoveWorkspace, onNewInWorkspace, page, onPage,
-  collapsed, onToggleCollapse, ideMode, runningIds, toolsTab,
+  collapsed, onToggleCollapse, ideMode, runningIds, unreadFinished, toolsTab,
   pluginPages = [], activePluginPageKey = null, onOpenPluginPage,
 }: {
   sessions: Session[];
   activeId: string;
   runningIds: Set<string>;
+  unreadFinished?: Map<string, SessionFinishStatus>;
   provider: SearchProvider;
   hasKey: boolean;
   providerMenu: boolean;
@@ -302,12 +329,13 @@ export default function Sidebar({
   const wsShort = (p: string) => p.split(/[\\/]/).filter(Boolean).slice(-1)[0] || p;
   const renderSession = (s: Session, nested = false) => {
     const busy = runningIds.has(s.id);
+    const unread = !busy ? unreadFinished?.get(s.id) : undefined;
     const mode: SessionPermission['mode'] = s.permission?.mode ?? 'default';
     const key = `session:${s.id}`;
     return (
       <div
         key={s.id}
-        className={'session-item' + (nested ? ' nested' : '') + (s.id === activeId ? ' active' : '')}
+        className={'session-item' + (nested ? ' nested' : '') + (s.id === activeId ? ' active' : '') + (unread ? ' unread' : '')}
         onClick={() => onSelect(s.id)}
       >
         {!nested && <MessageSquare size={14} className="session-icon" />}
@@ -320,11 +348,20 @@ export default function Sidebar({
         {busy ? (
           <span className="session-spin" title="正在生成" aria-label="正在生成" />
         ) : (
-          <span className="session-actions">
-            <button className="row-icon-btn" aria-label="更多操作" onClick={openMenu(key)}>
-              <MoreHorizontal size={18} strokeWidth={2.2} />
-            </button>
-          </span>
+          <>
+            {unread && (
+              <span
+                className={`session-done-dot ${unread}`}
+                title={FINISH_STATUS_TIP[unread]}
+                aria-label={FINISH_STATUS_TIP[unread]}
+              />
+            )}
+            <span className="session-actions">
+              <button className="row-icon-btn" aria-label="更多操作" onClick={openMenu(key)}>
+                <MoreHorizontal size={18} strokeWidth={2.2} />
+              </button>
+            </span>
+          </>
         )}
         {renderMenu(key, <>
           {onSetPermissionMode && (
@@ -489,6 +526,7 @@ export default function Sidebar({
         {workspaceRoots.map((ws) => {
           const list = byWorkspace[ws] || [];
           const current = wsInfo?.root === ws;
+          const wsUnread = !wsOpen[ws] ? pickGroupUnread(list, unreadFinished) : undefined;
           const key = `ws:${ws}`;
           return (
             <div key={ws}>
@@ -500,6 +538,12 @@ export default function Sidebar({
                 >
                   <ChevronDown size={13} className={wsOpen[ws] ? '' : 'collapsed'} />
                   <Folder size={13} /> <span className="ws-folder-name">{wsShort(ws)}</span>
+                  {wsUnread && (
+                    <span
+                      className={`session-done-dot ${wsUnread}`}
+                      title={`此工作区有后台会话：${FINISH_STATUS_TIP[wsUnread]}`}
+                    />
+                  )}
                 </button>
                 <div className="ws-actions">
                   <Tips label="在此工作区新建会话">
@@ -525,15 +569,26 @@ export default function Sidebar({
         <div className="session-list">
           {recentSessions.length === 0 && <div className="side-empty">还没有对话</div>}
           {(recentExpanded ? recentSessions : recentSessions.slice(0, RECENT_PREVIEW_COUNT)).map((s) => renderSession(s))}
-          {recentSessions.length > RECENT_PREVIEW_COUNT && (
-            <button
-              type="button"
-              className="side-recent-more"
-              onClick={() => setRecentExpanded((v) => !v)}
-            >
-              {recentExpanded ? '收起' : <>查看更多 ({recentSessions.length}) <ChevronDown size={13} /></>}
-            </button>
-          )}
+          {recentSessions.length > RECENT_PREVIEW_COUNT && (() => {
+            const hiddenUnread = !recentExpanded
+              ? pickGroupUnread(recentSessions.slice(RECENT_PREVIEW_COUNT), unreadFinished)
+              : undefined;
+            return (
+              <button
+                type="button"
+                className="side-recent-more"
+                onClick={() => setRecentExpanded((v) => !v)}
+              >
+                {recentExpanded ? '收起' : <>查看更多 ({recentSessions.length}) <ChevronDown size={13} /></>}
+                {hiddenUnread && (
+                  <span
+                    className={`session-done-dot ${hiddenUnread}`}
+                    title={`折叠列表中有后台会话：${FINISH_STATUS_TIP[hiddenUnread]}`}
+                  />
+                )}
+              </button>
+            );
+          })()}
         </div>
           </>
         )}
